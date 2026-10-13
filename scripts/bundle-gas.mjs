@@ -1,15 +1,11 @@
 // dist/index.html（vite build の成果物）を、clasp が push できる形に仕上げる。
 //
 //   node scripts/bundle-gas.mjs [--icon-url <URL or ID>] [--redirect-url <URL>] [--dist <dir>] [--gas <dir>]
-//                               [--drive off] [--execute-as <deploying|accessing>] [--access <myself|domain|anyone|anonymous>] [--plan]
+//                               [--execute-as <deploying|accessing>] [--access <myself|domain|anyone|anonymous>] [--plan]
 //
 // やること:
 //   - gas/*.gs（現在は Code.gs 1 本）を dist/ にコピー（Code.gs のプレースホルダー行だけ置換。gas/ のソースは書き換えない）
 //   - gas/appsscript.json を dist/ に出力（--execute-as / --access の指定を webapp に反映。deploy.ps1 は引数を渡すだけで、JSON の組み立てと判定はここだけ）
-//   - Drive 連携の無効化（--drive off / AUDIO_SPLITTER_DRIVE=off。引数が優先）: Code.gs の DRIVE_ENABLED_ を false にし、
-//     appsscript.json から Drive 連携用のスコープと Advanced Drive Service を取り除く。
-//     最終的な executeAs が USER_ACCESSING 以外（USER_DEPLOYING）のときは、指定が無くても自動で無効にする
-//     （デプロイした本人として実行すると、アクセスした全員がデプロイ者の Drive を操作できてしまうため）。
 //   - 最終的な executeAs が USER_ACCESSING で access が ANYONE_ANONYMOUS（両立しない）ならエラー
 //   - --plan: 何も書かず、配信設定の最終値を JSON 1 行で表示して終わる（deploy.ps1 の事前確認用）
 //   - dist/index.html の <head> 直後に <base target="_top"> を挿入（二重には入れない）
@@ -30,22 +26,6 @@ export const DEFAULT_DIST_DIR = path.join(ROOT, 'dist');
 
 const ICON_URL_RE = /^(var APP_ICON_URL_ = )'';(.*)$/m;
 const REDIRECT_URL_RE = /^(var REDIRECT_URL_ = )'';(.*)$/m;
-const DRIVE_ENABLED_RE = /^(var DRIVE_ENABLED_ = )true;(.*)$/m;
-// Drive 連携に使うスコープ（gas/appsscript.json に明示しているもの）
-export const DRIVE_SCOPES = [
-  'https://www.googleapis.com/auth/drive',
-  'https://www.googleapis.com/auth/script.external_request',
-  'https://www.googleapis.com/auth/userinfo.email',
-];
-// Drive 連携を無効にして組み立てるとき、oauthScopes から取り除くスコープ（Drive の読み書きと外部通信）
-export const DRIVE_ACCESS_SCOPES = [
-  'https://www.googleapis.com/auth/drive',
-  'https://www.googleapis.com/auth/script.external_request',
-];
-// 無効のときも必ず明示しておくスコープ。oauthScopes を空（未指定）にすると、Apps Script がコードの内容から
-// 必要なスコープを自動で判定し、dist/Code.gs に残っている Drive 関連のコードを見て drive を付け直してしまう。
-// 明示のスコープがあれば自動判定は行われないので、害のないスコープ（自分のメールアドレスの参照）だけを残す。
-export const DISABLED_BASE_SCOPE = 'https://www.googleapis.com/auth/userinfo.email';
 const EXECUTE_AS_MAP = { deploying: 'USER_DEPLOYING', accessing: 'USER_ACCESSING' };
 const ACCESS_MAP = { myself: 'MYSELF', domain: 'DOMAIN', anyone: 'ANYONE', anonymous: 'ANYONE_ANONYMOUS' };
 const BASE_TAG = '<base target="_top">';
@@ -103,42 +83,25 @@ export function normalizeRedirectUrl(value) {
   return s;
 }
 
-/**
- * Drive 連携を有効にするかの指定（--drive / AUDIO_SPLITTER_DRIVE）を真偽にする。'off'（大文字小文字・前後の空白は無視）だけが無効。
- * 空・未指定・'on' は有効。それ以外の値は例外（打ち間違いで意図せず有効のまま組み立てないため）。
- */
-export function normalizeDrive(value) {
-  const s = String(value == null ? '' : value).trim().toLowerCase();
-  if (s === '' || s === 'on') return true;
-  if (s === 'off') return false;
-  throw new Error(`Drive 連携の指定は on か off にしてください（指定値: ${s.slice(0, 20)}）。`);
-}
-
-/** Code.gs のプレースホルダー行を置換する。行が無ければ例外。値が空なら置換しない。driveEnabled === false のとき DRIVE_ENABLED_ を false にする。 */
-export function bakeCodeGs(source, { iconUrl = '', redirectUrl = '', driveEnabled = true } = {}) {
+/** Code.gs のプレースホルダー行を置換する。行が無ければ例外。値が空なら置換しない。 */
+export function bakeCodeGs(source, { iconUrl = '', redirectUrl = '' } = {}) {
   if (!ICON_URL_RE.test(source)) throw new Error("Code.gs に \"var APP_ICON_URL_ = '';\" の行が見つかりません。");
   if (!REDIRECT_URL_RE.test(source)) throw new Error("Code.gs に \"var REDIRECT_URL_ = '';\" の行が見つかりません。");
-  if (!DRIVE_ENABLED_RE.test(source)) throw new Error('Code.gs に "var DRIVE_ENABLED_ = true;" の行が見つかりません。');
   let out = source;
   // 関数形式の replace（値に $ などが含まれても置換パターンとして解釈されない）
   if (iconUrl) out = out.replace(ICON_URL_RE, (_, a, b) => a + "'" + iconUrl + "';" + b);
   if (redirectUrl) out = out.replace(REDIRECT_URL_RE, (_, a, b) => a + "'" + redirectUrl + "';" + b);
-  if (driveEnabled === false) out = out.replace(DRIVE_ENABLED_RE, (_, a, b) => a + 'false;' + b);
   return out;
 }
 
 /**
- * 配信設定（executeAs / access / Drive 連携）の最終値を決める。deploy.ps1 は引数をここへ渡すだけで、判定は持たない。
+ * 配信設定（executeAs / access）の最終値を決める。deploy.ps1 は引数をここへ渡すだけで、判定は持たない。
  * @param {object} manifest gas/appsscript.json を JSON.parse したもの（webapp の既定値）
  * @param {object} [o]
  * @param {string} [o.executeAs] 'deploying' | 'accessing'（省略 = マニフェストの値）
  * @param {string} [o.access] 'myself' | 'domain' | 'anyone' | 'anonymous'（省略 = マニフェストの値）
- * @param {string|boolean} [o.drive] 'off' で Drive 連携を無効にする（既定は有効）
- * @returns {{executeAs: string, access: string, driveEnabled: boolean, driveAutoDisabled: boolean}}
- *   driveAutoDisabled = Drive 連携を有効にするつもりだったが、executeAs が USER_ACCESSING でないため自動で無効にした
+ * @returns {{executeAs: string, access: string}}
  * 規則:
- *   - Drive 連携が有効になるのは executeAs が USER_ACCESSING のときだけ。それ以外（USER_DEPLOYING、未指定を含む）は自動で無効にする
- *     （デプロイした本人として実行すると、アクセスした全員がデプロイ者の Drive を操作できてしまうため）。
  *   - USER_ACCESSING と ANYONE_ANONYMOUS は両立しない（ログインしていない人には「アクセスしているユーザー」がいない）ので例外。
  */
 export function resolveWebapp(manifest, o = {}) {
@@ -155,32 +118,15 @@ export function resolveWebapp(manifest, o = {}) {
   }
   if (executeAs === 'USER_ACCESSING' && access === 'ANYONE_ANONYMOUS') {
     throw new Error('ログイン不要（-Access anonymous）の公開は「アクセスしているユーザーとして実行」と両立しません（ログインしていない人には「アクセスしているユーザー」がいないため、Google がこの組み合わせを受け付けません）。' +
-      'ログイン不要で公開するなら -ExecuteAs deploying を付けてください（その場合 Google ドライブ連携は無効になります）。');
+      'ログイン不要で公開するなら -ExecuteAs deploying を付けてください。');
   }
-  const requested = typeof o.drive === 'boolean' ? o.drive : normalizeDrive(o.drive);
-  const driveEnabled = requested && executeAs === 'USER_ACCESSING';
-  return { executeAs, access, driveEnabled, driveAutoDisabled: requested && !driveEnabled };
+  return { executeAs, access };
 }
 
-/**
- * マニフェストを組み立てる（元のオブジェクトは変えない）。resolveWebapp の結果を webapp に書き、Drive 連携が無効なら権限を外す。
- * 無効のとき: oauthScopes から DRIVE_ACCESS_SCOPES を取り除き、DISABLED_BASE_SCOPE を必ず含む明示の一覧にする
- * （oauthScopes を未指定にしない。未指定だと Apps Script がコードからスコープを自動判定し、drive が付き直すため）。
- * dependencies.enabledAdvancedServices からは Drive を取り除く（空になった項目はキーごと消す）。
- */
+/** マニフェストを組み立てる（元のオブジェクトは変えない）。resolveWebapp の結果を webapp に書く。 */
 export function buildManifest(manifest, resolved) {
   const m = JSON.parse(JSON.stringify(manifest));
   m.webapp = { ...(m.webapp || {}), executeAs: resolved.executeAs, access: resolved.access };
-  if (!resolved.driveEnabled) {
-    const kept = (Array.isArray(m.oauthScopes) ? m.oauthScopes : []).filter((s) => !DRIVE_ACCESS_SCOPES.includes(s));
-    if (!kept.includes(DISABLED_BASE_SCOPE)) kept.push(DISABLED_BASE_SCOPE);
-    m.oauthScopes = kept;
-    if (m.dependencies && Array.isArray(m.dependencies.enabledAdvancedServices)) {
-      m.dependencies.enabledAdvancedServices = m.dependencies.enabledAdvancedServices.filter((s) => !(s && (s.serviceId === 'drive' || s.userSymbol === 'Drive')));
-      if (m.dependencies.enabledAdvancedServices.length === 0) delete m.dependencies.enabledAdvancedServices;
-      if (Object.keys(m.dependencies).length === 0) delete m.dependencies;
-    }
-  }
   return m;
 }
 
@@ -202,9 +148,8 @@ export function insertBaseTag(html) {
  * @param {string} [opts.redirectUrl] 未指定なら環境変数 AUDIO_SPLITTER_REDIRECT_URL
  * @param {string} [opts.executeAs] 'deploying' | 'accessing'（省略 = gas/appsscript.json の値）
  * @param {string} [opts.access] 'myself' | 'domain' | 'anyone' | 'anonymous'（省略 = gas/appsscript.json の値）
- * @param {string} [opts.drive] 'off' で Drive 連携を無効にして組み立てる。未指定なら環境変数 AUDIO_SPLITTER_DRIVE（既定は有効）
  * @param {object} [opts.env] 環境変数（テスト用。既定は process.env）
- * @returns {{files: {name: string, bytes: number}[], iconBaked: boolean, redirectBaked: boolean, executeAs: string, access: string, driveEnabled: boolean, driveAutoDisabled: boolean, warnings: string[]}}
+ * @returns {{files: {name: string, bytes: number}[], iconBaked: boolean, redirectBaked: boolean, executeAs: string, access: string, warnings: string[]}}
  */
 export function bundleGas(opts = {}) {
   const gasDir = opts.gasDir ?? DEFAULT_GAS_DIR;
@@ -223,18 +168,17 @@ export function bundleGas(opts = {}) {
   const manifestPath = path.join(gasDir, 'appsscript.json');
   if (!fs.existsSync(manifestPath)) throw new Error('gas/appsscript.json がありません。');
 
-  // 配信設定の最終値（executeAs / access / Drive 連携）。不整合ならここで例外（何も書かない）
+  // 配信設定の最終値（executeAs / access）。不整合ならここで例外（何も書かない）
   const resolved = resolveWebapp(JSON.parse(fs.readFileSync(manifestPath, 'utf8')), {
     executeAs: opts.executeAs,
     access: opts.access,
-    drive: opts.drive !== undefined ? opts.drive : env.AUDIO_SPLITTER_DRIVE,
   });
 
   // 先にすべてメモリ上で作って検証する（途中で失敗して dist/ が中途半端にならないように）
   const outputs = new Map();
   for (const name of gsNames) {
     let code = fs.readFileSync(path.join(gasDir, name), 'utf8');
-    if (name === 'Code.gs') code = bakeCodeGs(code, { iconUrl, redirectUrl, driveEnabled: resolved.driveEnabled });
+    if (name === 'Code.gs') code = bakeCodeGs(code, { iconUrl, redirectUrl });
     new vm.Script(code, { filename: name }); // 構文チェック（失敗時は SyntaxError）
     outputs.set(name, code);
   }
@@ -261,18 +205,16 @@ export function bundleGas(opts = {}) {
 }
 
 /**
- * 何も書かずに、配信設定の最終値（executeAs / access / Drive 連携）だけを決めて返す（deploy.ps1 の事前確認・-WhatIf 用）。
- * 不整合（USER_ACCESSING と ANYONE_ANONYMOUS）は例外。opts は bundleGas と同じ（executeAs / access / drive / gasDir / env）。
+ * 何も書かずに、配信設定の最終値（executeAs / access）だけを決めて返す（deploy.ps1 の事前確認・-WhatIf 用）。
+ * 不整合（USER_ACCESSING と ANYONE_ANONYMOUS）は例外。opts は bundleGas と同じ（executeAs / access / gasDir / env）。
  */
 export function planDeploy(opts = {}) {
   const gasDir = opts.gasDir ?? DEFAULT_GAS_DIR;
-  const env = opts.env ?? process.env;
   const manifestPath = path.join(gasDir, 'appsscript.json');
   if (!fs.existsSync(manifestPath)) throw new Error('gas/appsscript.json がありません。');
   return resolveWebapp(JSON.parse(fs.readFileSync(manifestPath, 'utf8')), {
     executeAs: opts.executeAs,
     access: opts.access,
-    drive: opts.drive !== undefined ? opts.drive : env.AUDIO_SPLITTER_DRIVE,
   });
 }
 
@@ -280,7 +222,7 @@ export function parseArgs(argv) {
   const opts = {};
   const keys = {
     '--icon-url': 'iconUrl', '--redirect-url': 'redirectUrl', '--dist': 'distDir', '--gas': 'gasDir',
-    '--drive': 'drive', '--execute-as': 'executeAs', '--access': 'access',
+    '--execute-as': 'executeAs', '--access': 'access',
   };
   const flags = { '--plan': 'plan' };
   for (let i = 0; i < argv.length; i++) {
@@ -308,7 +250,7 @@ function main() {
   console.log(`[bundle-gas] ${distDir}`);
   for (const f of r.files) console.log(`  ${f.name.padEnd(16)} ${(f.bytes / 1024).toFixed(1).padStart(9)} KB`);
   console.log(`  アイコン: ${r.iconBaked ? '設定あり' : 'なし'} / リダイレクト: ${r.redirectBaked ? '設定あり' : 'なし'}`);
-  console.log(`  executeAs: ${r.executeAs} / access: ${r.access} / Google ドライブ連携: ${r.driveEnabled ? '有効' : (r.driveAutoDisabled ? '無効（executeAs が USER_ACCESSING でないため自動で無効）' : '無効')}`);
+  console.log(`  executeAs: ${r.executeAs} / access: ${r.access}`);
   for (const w of r.warnings) console.warn(`[警告] ${w}`);
 }
 

@@ -7,28 +7,12 @@ export const ACCEPT =
 
 export type ProbeState = { status: 'idle' } | { status: 'probing' } | { status: 'error'; message: string };
 
-/** Google ドライブからのダウンロードの状態 */
-export type DownloadState =
-  | { status: 'idle' }
-  | { status: 'downloading'; name: string; loaded: number; total: number }
-  | { status: 'error'; name: string; message: string }
-  | { status: 'aborted'; name: string };
-
-export interface DriveFileProps {
-  download: DownloadState;
-  onOpen: () => void;
-  onCancel: () => void;
-  onRetry: () => void;
-}
-
 interface Props {
   info: AudioInfo | null;
   probe: ProbeState;
   fileName: string | null;
   locked: boolean;
   onFile: (file: File) => void;
-  /** Drive が使えるときだけ渡す（null なら Drive 関連は何も表示しない） */
-  drive?: DriveFileProps | null;
 }
 
 function channelsLabel(n: number): string {
@@ -64,68 +48,9 @@ function InfoCard({ info }: { info: AudioInfo }) {
   );
 }
 
-function DownloadStatus({ drive }: { drive: DriveFileProps }) {
-  const d = drive.download;
-  if (d.status === 'downloading') {
-    const percent = d.total > 0 ? Math.min(100, Math.round((d.loaded / d.total) * 100)) : 0;
-    const text =
-      d.total > 0
-        ? `ダウンロード中… ${formatBytes(d.loaded)} / ${formatBytes(d.total)}（${percent}%）`
-        : 'ダウンロードを準備しています…';
-    return (
-      <div className="drive-download" data-testid="drive-download">
-        <p className="info-name">{d.name}</p>
-        <div className="progress-wrap">
-          <div
-            className="progress"
-            role="progressbar"
-            aria-label="ダウンロードの進み具合"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={percent}
-            aria-valuetext={text}
-            data-testid="drive-download-progress"
-          >
-            <div className="progress-bar" style={{ width: `${percent}%` }} />
-          </div>
-          <p className="progress-text" role="status" data-testid="drive-download-text">
-            {text}
-          </p>
-        </div>
-        <p className="hint">大きなファイルは時間がかかります。このページを開いたままお待ちください。</p>
-        <button type="button" className="btn btn-danger" onClick={drive.onCancel} data-testid="drive-download-cancel">
-          中止
-        </button>
-      </div>
-    );
-  }
-  if (d.status === 'error') {
-    return (
-      <div className="msg msg-error drive-download-error" role="alert" data-testid="drive-download-error">
-        <p>
-          「{d.name}」を開けませんでした。{d.message}
-        </p>
-        <button type="button" className="btn btn-sm" onClick={drive.onRetry} data-testid="drive-download-retry">
-          もう一度試す
-        </button>
-      </div>
-    );
-  }
-  if (d.status === 'aborted') {
-    return (
-      <p className="msg msg-warn" role="status" data-testid="drive-download-aborted">
-        ダウンロードを中止しました。
-      </p>
-    );
-  }
-  return null;
-}
-
-export function FileSection({ info, probe, fileName, locked, onFile, drive }: Props) {
+export function FileSection({ info, probe, fileName, locked, onFile }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const open = () => inputRef.current?.click();
-  const downloading = drive?.download.status === 'downloading';
-  const disabled = locked || downloading;
 
   return (
     <section className="card" aria-labelledby="file-h">
@@ -156,56 +81,21 @@ export function FileSection({ info, probe, fileName, locked, onFile, drive }: Pr
         </p>
       )}
 
-      {drive && <DownloadStatus drive={drive} />}
-
       {info && probe.status === 'idle' ? (
         <div className="file-loaded">
           <InfoCard info={info} />
-          <div className="file-actions">
-            <button type="button" className="btn" onClick={open} disabled={disabled} data-testid="change-file-button">
-              別のファイルを選ぶ
-            </button>
-            {drive && (
-              <button
-                type="button"
-                className="btn"
-                onClick={drive.onOpen}
-                disabled={disabled}
-                data-testid="drive-change-button"
-              >
-                ドライブから別のファイルを選ぶ
-              </button>
-            )}
-          </div>
+          <button type="button" className="btn" onClick={open} disabled={locked} data-testid="change-file-button">
+            別のファイルを選ぶ
+          </button>
         </div>
       ) : (
-        probe.status !== 'probing' &&
-        !downloading && (
+        probe.status !== 'probing' && (
           <div className="dropzone" data-testid="drop-zone">
             <p className="dropzone-title">ここに音声ファイルをドラッグ＆ドロップ</p>
             <p className="hint">m4a / mp3 / wav / ogg / flac や、音声入りの mp4 などの動画が使えます。</p>
-            <div className="dropzone-actions">
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={open}
-                disabled={disabled}
-                data-testid="choose-file-button"
-              >
-                ファイルを選ぶ
-              </button>
-              {drive && (
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={drive.onOpen}
-                  disabled={disabled}
-                  data-testid="drive-choose-button"
-                >
-                  Google ドライブから選ぶ
-                </button>
-              )}
-            </div>
+            <button type="button" className="btn btn-primary" onClick={open} data-testid="choose-file-button">
+              ファイルを選ぶ
+            </button>
           </div>
         )
       )}

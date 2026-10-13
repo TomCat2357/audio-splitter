@@ -5,9 +5,9 @@
 #
 # npm run build で dist/index.html を作り、scripts/bundle-gas.mjs で dist/ に GAS 用ファイルを揃え、clasp で push / deploy する。
 #   dist/index.html       … vite の成果物（単一 HTML。<head> 直後に <base target="_top"> を挿入）
-#   dist/Code.gs          … gas/Code.gs（doGet・リダイレクト処理・Google ドライブ連携。-IconUrl / -RedirectUrl を指定したときだけ焼き込む）
+#   dist/Code.gs          … gas/Code.gs（doGet・リダイレクト処理。-IconUrl / -RedirectUrl を指定したときだけ焼き込む）
 #   dist/appsscript.json  … gas/appsscript.json（-ExecuteAs / -Access 指定時はその項目だけ書き換え）
-# executeAs / access の最終値の判定、Drive 連携の自動無効化、appsscript.json の書き出しは scripts/bundle-gas.mjs に一本化している
+# executeAs / access の最終値の判定、appsscript.json の書き出しは scripts/bundle-gas.mjs に一本化している
 # （このスクリプトは -ExecuteAs / -Access をそのまま渡して、結果の表示と中止の判断だけを行う）。
 #
 # Usage: .\deploy.ps1 [-Stage <bundle|push|deploy>] [-Test]
@@ -137,14 +137,6 @@ npm run build で dist/index.html を作り、scripts/bundle-gas.mjs で dist/ �
 index.html / Code.gs / appsscript.json を揃え、clasp で push / deploy します。
 既定（-Stage deploy）は push + デプロイまで行います。
 
-Google ドライブ連携について:
-  既定の構成は「アクセスしているユーザーとして実行」(USER_ACCESSING) で、Drive 連携が有効です。
-  「デプロイしたユーザーとして実行」(-ExecuteAs deploying) にすると、有効のままではアクセスした全員が
-  あなたのドライブを操作できてしまうため、Drive 連携を自動で無効にして組み立てます
-  （Code.gs の DRIVE_ENABLED_ を false にし、appsscript.json から Drive 用のスコープと Drive サービスを外します）。
-  ローカルファイルの分割は Drive 連携なしでも使えます。
-  「アクセスしているユーザーとして実行」と -Access anonymous（ログイン不要）は両立しないため、何も実行せずに中止します。
-
 Options:
   -Stage <bundle|push|deploy>  どこまで進めるかを指定します（既定: deploy）。
                               bundle = dist/ を生成するだけ（clasp 不要・ログイン不要）。
@@ -168,13 +160,12 @@ Options:
     （前回の値は引き継がれないので、デプロイのたびに指定が必要です）。値は git に入りません（dist/ は無視）。
   -ExecuteAs <deploying|accessing>
                               指定したときだけ dist/appsscript.json の webapp.executeAs を書き換えます
-                              （deploying=USER_DEPLOYING / accessing=USER_ACCESSING）。未指定なら gas/ の値（USER_ACCESSING）。
-                              deploying にすると Google ドライブ連携は自動で無効になります。
+                              （deploying=USER_DEPLOYING / accessing=USER_ACCESSING）。未指定なら gas/ の値（USER_DEPLOYING）。
   -Access <myself|domain|anyone|anonymous>
                               指定したときだけ webapp.access を書き換えます
                               （myself=MYSELF / domain=DOMAIN / anyone=ANYONE / anonymous=ANYONE_ANONYMOUS）。
                               未指定なら gas/ の値（MYSELF）。anyone / anonymous は公開範囲が広いので警告を表示します。
-                              anonymous は -ExecuteAs deploying とだけ組み合わせられます（Drive 連携は無効になります）。
+                              anonymous は -ExecuteAs deploying とだけ組み合わせられます（accessing との組み合わせは、何も実行せずに中止します）。
   -ForcePush                    clasp push に --force を付けます（appsscript.json の上書き確認を自動承認）。
                               clasp は確認に非対話で答えられず、何も送らずに終了コード 0 で終わることがあります。
                               その場合（出力に Skipping push）は失敗として扱うので、-ForcePush を付けて再実行してください。
@@ -187,7 +178,7 @@ Options:
   .\deploy.ps1 -Test -ForcePush                  テスト後に push（--force）+ デプロイ
   .\deploy.ps1 -IconUrl https://drive.google.com/file/d/<ID>/view   タブのアイコンを焼き込む
   .\deploy.ps1 -RedirectUrl https://script.google.com/macros/s/<デプロイID>/exec   旧デプロイ用: 移動先を焼き込む
-  .\deploy.ps1 -ExecuteAs deploying -Access anonymous   ログイン不要で公開（Drive 連携は自動で無効）
+  .\deploy.ps1 -ExecuteAs deploying -Access anonymous   ログイン不要で公開
   .\deploy.ps1 -WhatIf                           ドライラン
 '@
 }
@@ -224,7 +215,7 @@ try {
     exit 1
 }
 
-# 配信設定（executeAs / access / Drive 連携）の最終値を bundle-gas.mjs --plan に決めてもらう（何も書かない）。
+# 配信設定（executeAs / access）の最終値を bundle-gas.mjs --plan に決めてもらう（何も書かない）。
 # USER_ACCESSING と anonymous の組み合わせなど、成り立たない指定はここで [NG] にして、build や push の前に止める。
 $Plan = $null
 try {
@@ -244,21 +235,6 @@ try {
 # -Access を指定したときだけ公開範囲の警告を出す（未指定の gas/ の既定値では出さない）
 $ManifestAccess = ""
 if ($PSBoundParameters.ContainsKey("Access")) { $ManifestAccess = [string]$Plan.access }
-
-function Write-DriveNotice {
-    if ($Plan.driveAutoDisabled) {
-        Write-Host ""
-        Write-Host "!!!! Google ドライブ連携を無効にします !!!!" -ForegroundColor Yellow
-        Write-Host "  デプロイしたユーザーとして実行する構成のため、Google ドライブ連携を無効にします" -ForegroundColor Yellow
-        Write-Host "  （有効のままだと、利用者全員があなたのドライブを操作できてしまうため）。" -ForegroundColor Yellow
-        Write-Host "  ローカルファイルの分割はそのまま使えます。dist/Code.gs の DRIVE_ENABLED_ を false にし、appsscript.json から Drive のスコープとサービスを外します。" -ForegroundColor Yellow
-        Write-Host ""
-    } elseif (-not $Plan.driveEnabled) {
-        Write-Host ""
-        Write-Host "[注意] Google ドライブ連携は無効で組み立てます（環境変数 AUDIO_SPLITTER_DRIVE=off）。" -ForegroundColor Yellow
-        Write-Host ""
-    }
-}
 
 function Write-AccessWarning {
     if ($ManifestAccess -eq "ANYONE" -or $ManifestAccess -eq "ANYONE_ANONYMOUS") {
@@ -305,14 +281,6 @@ if ($WhatIf) {
         Write-Host "  $n. dist/appsscript.json の webapp 設定は変更しない予定（gas/ の値のまま: executeAs=$($Plan.executeAs) / access=$($Plan.access)）"
     }
     $n++
-    if ($Plan.driveEnabled) {
-        Write-Host "  $n. Google ドライブ連携は有効（dist/Code.gs の DRIVE_ENABLED_ = true。appsscript.json の Drive スコープと Drive サービスを残す）"
-    } elseif ($Plan.driveAutoDisabled) {
-        Write-Host "  $n. Google ドライブ連携を自動で無効にする予定（executeAs=$($Plan.executeAs) のため。DRIVE_ENABLED_ を false にし、appsscript.json から Drive のスコープとサービスを外す）" -ForegroundColor Yellow
-    } else {
-        Write-Host "  $n. Google ドライブ連携は無効（AUDIO_SPLITTER_DRIVE=off。DRIVE_ENABLED_ を false にし、appsscript.json から Drive のスコープとサービスを外す）" -ForegroundColor Yellow
-    }
-    $n++
     if ($Stage -eq "push" -or $Stage -eq "deploy") {
         Write-Host "  $n. clasp / ~/.clasprc.json / .clasp.json（scriptId）の有無を確認"; $n++
         Write-Host "  $n. .clasp.json の rootDir を一時的に dist へ向けて clasp push$(if ($ForcePush) { ' --force' }) を実行予定（終了後に元へ戻す）"; $n++
@@ -321,12 +289,10 @@ if ($WhatIf) {
         Write-Host "  $n. clasp deploy を実行予定（.gas-deployment.json の deploymentId があれば --deploymentId で再利用して URL を維持）"; $n++
         Write-Host "  $n. デプロイ ID と URL を .gas-deployment.json に保存予定"; $n++
     }
-    Write-DriveNotice
     Write-AccessWarning
     exit 0
 }
 
-Write-DriveNotice
 Write-AccessWarning
 Set-Location $RepoRoot
 
@@ -381,17 +347,12 @@ try {
         }
     }
 
-    # dist/appsscript.json の webapp 設定と Drive 連携の反映は bundle-gas.mjs が済ませている。ここでは結果の表示だけ
+    # dist/appsscript.json の webapp 設定の反映は bundle-gas.mjs が済ませている。ここでは結果の表示だけ
     $applied = @()
     if ($PSBoundParameters.ContainsKey("ExecuteAs")) { $applied += "executeAs=$($Plan.executeAs)" }
     if ($PSBoundParameters.ContainsKey("Access")) { $applied += "access=$($Plan.access)" }
     if ($applied.Count -gt 0) {
         Write-Host "[OK] dist/appsscript.json に $($applied -join ' / ') を適用しました" -ForegroundColor Magenta
-    }
-    if ($Plan.driveEnabled) {
-        Write-Host "[OK] Google ドライブ連携: 有効（executeAs=$($Plan.executeAs)）" -ForegroundColor Magenta
-    } else {
-        Write-Host "[OK] Google ドライブ連携: 無効で組み立てました（DRIVE_ENABLED_ = false。Drive のスコープとサービスは外してあります）" -ForegroundColor Yellow
     }
 
     if ($ResolvedIconUrl -ne "") {

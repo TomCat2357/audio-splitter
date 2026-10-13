@@ -1,19 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { DriveModal } from './components/DriveModal';
-import { FileSection, type DownloadState, type ProbeState } from './components/FileSection';
+import { FileSection, type ProbeState } from './components/FileSection';
 import { OutputSettings, type OutputState } from './components/OutputSettings';
 import { PlayerPanel } from './components/PlayerPanel';
-import { Results, type ResultItem, type SaveState } from './components/Results';
+import { Results, type ResultItem } from './components/Results';
 import { RunPanel, type RunState } from './components/RunPanel';
 import { SplitPanel } from './components/SplitPanel';
-import { useDriveEnabled } from './hooks/useDriveEnabled';
 import { useObjectUrl } from './hooks/useObjectUrl';
 import { usePlayer } from './hooks/usePlayer';
 import { useShortcuts } from './hooks/useShortcuts';
-import { abortError, downloadDriveFile, isAbort, uniqueName, uploadToDrive } from './lib/driveTransfer';
-import { DriveTransferError, type DriveFolder, type DriveItem, type ListFolderResult } from './lib/driveTypes';
 import { getEncodeSupport, isAbortError, probeFile, runJob } from './lib/engine';
-import { gasCall, isGasError } from './lib/gas';
 import { estimateOutputBytesPerSec, formatTime, isPcmFormat } from './lib/plan';
 import {
   DEFAULT_VALUES,
@@ -32,9 +27,6 @@ import { zipParts } from './lib/zip';
 
 type Notice = { text: string; tone: 'info' | 'warn' };
 
-/** Drive から開いたファイルの出どころ（保存先の最初の表示位置に使う） */
-type DriveSource = { fileId: string; parentId: string | null };
-
 const DEFAULT_OUTPUT: OutputState = { kind: 'copy', format: 'm4a', bitrateKbps: 64, mono: false, sampleRate: 0 };
 
 function stemOf(name: string): string {
@@ -48,15 +40,6 @@ export default function App() {
   const [probe, setProbe] = useState<ProbeState>({ status: 'idle' });
   const probeToken = useRef(0);
   const [pendingName, setPendingName] = useState<string | null>(null);
-  const driveEnabled = useDriveEnabled();
-  const [driveSource, setDriveSource] = useState<DriveSource | null>(null);
-  const [driveModal, setDriveModal] = useState<'load' | 'save' | null>(null);
-  const [download, setDownload] = useState<DownloadState>({ status: 'idle' });
-  const downloadAbort = useRef<AbortController | null>(null);
-  const lastDownloadItem = useRef<DriveItem | null>(null);
-  const [saveState, setSaveState] = useState<SaveState>({ status: 'idle' });
-  const saveAbort = useRef<AbortController | null>(null);
-
   const inputUrl = useObjectUrl(file);
   const duration = info?.durationSec ?? 0;
   const player = usePlayer(inputUrl, duration);
@@ -88,10 +71,8 @@ export default function App() {
   const [dragging, setDragging] = useState(false);
 
   const running = runState.status === 'running';
-  const downloading = download.status === 'downloading';
-  const saving = saveState.status === 'saving';
-  // 分割の実行中・Drive との転送中は、ファイルの読み込みや設定の変更、実行を受け付けない
-  const busy = running || downloading || saving;
+  // 分割の実行中は、ファイルの読み込みや設定の変更、実行を受け付けない
+  const busy = running;
 
   // ---- 結果の管理（object URL は不要になったら必ず revoke） ----
   const clearResults = useCallback(() => {
@@ -99,25 +80,21 @@ export default function App() {
     resultsRef.current = [];
     setResults([]);
     setZipError(null);
-    setSaveState({ status: 'idle' });
   }, []);
 
   useEffect(
     () => () => {
       resultsRef.current.forEach((r) => URL.revokeObjectURL(r.url));
       resultsRef.current = [];
-      downloadAbort.current?.abort();
-      saveAbort.current?.abort();
     },
     [],
   );
 
   // ---- ファイル読み込み ----
   const loadFile = useCallback(
-    async (f: File, source: DriveSource | null = null) => {
+    async (f: File) => {
       const token = ++probeToken.current;
       clearResults();
-      setDriveSource(source);
       setRunState({ status: 'idle' });
       setInfo(null);
       setFile(null);
@@ -323,96 +300,6 @@ export default function App() {
 
   const cancelRun = () => abortRef.current?.abort();
 
-  // ---- Google ドライブ ----
-  const startDownload = async (item: DriveItem) => {
-    if (busy) return;
-    const ac = new AbortController();
-    downloadAbort.current = ac;
-    lastDownloadItem.current = item;
-    let parentId: string | null = null;
-    setDownload({ status: 'downloading', name: item.name, loaded: 0, total: item.size ?? 0 });
-    try {
-      const f = await downloadDriveFile(item.id, {
-        signal: ac.signal,
-        onInfo: (i) => {
-          parentId = i.parentId;
-          setDownload({ status: 'downloading', name: i.name, loaded: 0, total: i.size });
-        },
-        onProgress: (loaded, total) => setDownload({ status: 'downloading', name: item.name, loaded, total }),
-      });
-      downloadAbort.current = null;
-      setDownload({ status: 'idle' });
-      void loadFile(f, { fileId: item.id, parentId });
-    } catch (e) {
-      downloadAbort.current = null;
-      if (isAbort(e)) setDownload({ status: 'aborted', name: item.name });
-      else setDownload({ status: 'error', name: item.name, message: e instanceof Error ? e.message : String(e) });
-    }
-  };
-
-  const cancelDownload = () => downloadAbort.current?.abort();
-  const retryDownload = () => {
-    if (lastDownloadItem.current) void startDownload(lastDownloadItem.current);
-  };
-
-  const startSave = async (dest: DriveFolder) => {
-    const items = resultsRef.current;
-    if (busy || items.length === 0) return;
-    const ac = new AbortController();
-    saveAbort.current = ac;
-    const total = items.length;
-    const totalBytes = items.reduce((s, r) => s + r.part.blob.size, 0) || 1;
-    const folder = { id: dest.id, name: dest.name };
-    let saved = 0;
-    // 保存先の一覧が打ち切られた（truncated）= 同名の確認が不完全。保存は続け、結果の表示に注意を添える
-    let namesIncomplete = false;
-    setSaveState({ status: 'saving', index: 0, total, percent: 0, folderName: folder.name });
-    try {
-      // 同名を避けるため、保存先にあるファイル名を先に調べる
-      const listed = await gasCall<ListFolderResult>('listFolder', dest.id);
-      if (isGasError(listed)) throw new DriveTransferError(listed.error, listed.code);
-      namesIncomplete = !!listed.truncated;
-      if (ac.signal.aborted) throw abortError();
-      const names = new Set(listed.items.map((i) => i.name));
-      let doneBytes = 0;
-      for (let i = 0; i < total; i++) {
-        const { part } = items[i];
-        const name = uniqueName(names, part.fileName);
-        names.add(name);
-        await uploadToDrive(dest.id, name, part.blob, {
-          signal: ac.signal,
-          onProgress: (sent) =>
-            setSaveState({
-              status: 'saving',
-              index: i,
-              total,
-              percent: Math.min(100, Math.round(((doneBytes + sent) / totalBytes) * 100)),
-              folderName: folder.name,
-            }),
-        });
-        doneBytes += part.blob.size;
-        saved++;
-      }
-      setSaveState({ status: 'done', count: saved, folder, namesIncomplete });
-    } catch (e) {
-      if (isAbort(e)) setSaveState({ status: 'stopped', reason: 'aborted', saved, total, folder, namesIncomplete });
-      else
-        setSaveState({
-          status: 'stopped',
-          reason: 'error',
-          message: e instanceof Error ? e.message : String(e),
-          saved,
-          total,
-          folder,
-          namesIncomplete,
-        });
-    } finally {
-      saveAbort.current = null;
-    }
-  };
-
-  const cancelSave = () => saveAbort.current?.abort();
-
   const saveZip = async () => {
     if (zipping || resultsRef.current.length === 0) return;
     setZipping(true);
@@ -440,11 +327,7 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <h1>音声分割</h1>
-        <p data-testid="header-note">
-          {driveEnabled
-            ? '音声の処理はすべてこのブラウザの中で行います。Google ドライブから開く・保存するときだけ、あなたの Google ドライブと通信します。'
-            : 'ファイルはこの端末の中だけで処理され、外部には送信されません。'}
-        </p>
+        <p data-testid="header-note">ファイルはこの端末の中だけで処理され、外部には送信されません。</p>
       </header>
 
       <main>
@@ -454,16 +337,6 @@ export default function App() {
           fileName={pendingName}
           locked={busy}
           onFile={(f) => void loadFile(f)}
-          drive={
-            driveEnabled
-              ? {
-                  download,
-                  onOpen: () => setDriveModal('load'),
-                  onCancel: cancelDownload,
-                  onRetry: retryDownload,
-                }
-              : null
-          }
         />
 
         {info && (
@@ -519,42 +392,10 @@ export default function App() {
               zipping={zipping}
               zipError={zipError}
               onZip={() => void saveZip()}
-              drive={
-                driveEnabled
-                  ? {
-                      state: saveState,
-                      disabled: running || downloading,
-                      onSave: () => setDriveModal('save'),
-                      onCancel: cancelSave,
-                    }
-                  : null
-              }
             />
           </>
         )}
       </main>
-
-      {driveModal === 'load' && (
-        <DriveModal
-          mode="load"
-          onClose={() => setDriveModal(null)}
-          onPickFile={(item) => {
-            setDriveModal(null);
-            void startDownload(item);
-          }}
-        />
-      )}
-      {driveModal === 'save' && (
-        <DriveModal
-          mode="save"
-          initialFolderId={driveSource?.parentId}
-          onClose={() => setDriveModal(null)}
-          onPickFolder={(folder) => {
-            setDriveModal(null);
-            void startSave(folder);
-          }}
-        />
-      )}
 
       {dragging && (
         <div className="drop-overlay" aria-hidden="true">
