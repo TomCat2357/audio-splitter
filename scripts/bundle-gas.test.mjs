@@ -114,21 +114,23 @@ describe('bundleGas（一時ディレクトリ）', () => {
     fs.mkdirSync(gasDir);
     for (const n of fs.readdirSync(REAL_GAS_DIR)) fs.writeFileSync(path.join(gasDir, n), fs.readFileSync(path.join(REAL_GAS_DIR, n)));
     fs.mkdirSync(distDir);
-    fs.writeFileSync(path.join(distDir, 'Index.html'), '<!doctype html><html><head><meta charset="utf-8"></head><body>音声</body></html>', 'utf8');
+    fs.writeFileSync(path.join(distDir, 'index.html'), '<!doctype html><html><head><meta charset="utf-8"></head><body>音声</body></html>', 'utf8');
     gasSnapshot = snapshot(gasDir);
   });
   afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
-  it('プレースホルダーを置換し、Index.html に base を入れ、appsscript.json と .gs を出力する', () => {
+  it('プレースホルダーを置換し、index.html に base を入れ、appsscript.json と .gs を出力する', () => {
     const r = run({ iconUrl: FAKE_ID, redirectUrl: DEST });
     const code = fs.readFileSync(path.join(distDir, 'Code.gs'), 'utf8');
     expect(code).toContain(`var APP_ICON_URL_ = '${FAKE_ICON}';`);
     expect(code).toContain(`var REDIRECT_URL_ = '${DEST}';`);
-    expect(fs.readFileSync(path.join(distDir, 'Index.html'), 'utf8')).toContain('<head><base target="_top">');
-    expect(fs.existsSync(path.join(distDir, 'Redirect.gs'))).toBe(true);
+    expect(fs.readFileSync(path.join(distDir, 'index.html'), 'utf8')).toContain('<head><base target="_top">');
+    expect(code).toContain('function doGet(');
+    expect(code).toContain('function redirectResponse_(');
     expect(fs.readFileSync(path.join(distDir, 'appsscript.json'), 'utf8')).toBe(gasSnapshot['appsscript.json']);
     expect(r.iconBaked && r.redirectBaked).toBe(true);
-    expect(r.files.map((f) => f.name).sort()).toEqual(['Code.gs', 'Index.html', 'Redirect.gs', 'appsscript.json']);
+    expect(r.files.map((f) => f.name).sort()).toEqual(['Code.gs', 'appsscript.json', 'index.html']);
+    expect(Object.keys(gasSnapshot).sort()).toEqual(['Code.gs', 'appsscript.json']);
   });
 
   it('gas/ のソースは変更されない', () => {
@@ -148,7 +150,7 @@ describe('bundleGas（一時ディレクトリ）', () => {
   it('二回実行しても base は二重にならない', () => {
     run();
     run();
-    const html = fs.readFileSync(path.join(distDir, 'Index.html'), 'utf8');
+    const html = fs.readFileSync(path.join(distDir, 'index.html'), 'utf8');
     expect(html.match(/<base target="_top">/g)).toHaveLength(1);
   });
 
@@ -185,9 +187,9 @@ describe('bundleGas（一時ディレクトリ）', () => {
     expect(() => run()).toThrow(SyntaxError);
   });
 
-  it('Index.html が無いとエラー', () => {
-    fs.rmSync(path.join(distDir, 'Index.html'));
-    expect(() => run()).toThrow(/Index\.html/);
+  it('index.html が無いとエラー', () => {
+    fs.rmSync(path.join(distDir, 'index.html'));
+    expect(() => run()).toThrow(/index\.html/);
   });
 
   it('前回の残骸（直下の .gs / .json / .html）だけ消し、他は触らない', () => {
@@ -198,12 +200,29 @@ describe('bundleGas（一時ディレクトリ）', () => {
     fs.mkdirSync(path.join(distDir, 'sub'));
     fs.writeFileSync(path.join(distDir, 'sub', 'x.gs'), '// sub', 'utf8');
     run();
-    expect(fs.readdirSync(distDir).sort()).toEqual(['Code.gs', 'Index.html', 'Redirect.gs', 'appsscript.json', 'keep.txt', 'sub']);
+    expect(fs.readdirSync(distDir).sort()).toEqual(['Code.gs', 'appsscript.json', 'index.html', 'keep.txt', 'sub']);
     expect(fs.existsSync(path.join(distDir, 'sub', 'x.gs'))).toBe(true);
   });
 
-  it('Index.html に <? があれば警告だけ出して続行', () => {
-    fs.writeFileSync(path.join(distDir, 'Index.html'), '<html><head></head><body><script>var a="<?";</script></body></html>', 'utf8');
+  it('以前のビルドの Redirect.gs と Index.html が残っていても消え、Code.gs / index.html / appsscript.json だけになる', () => {
+    // 大文字小文字を区別しない FS（Windows）では Index.html と index.html は同じファイルなので、いったん消してから古い綴りで作り直す
+    fs.rmSync(path.join(distDir, 'index.html'));
+    fs.writeFileSync(path.join(distDir, 'Index.html'), '<!doctype html><html><head></head><body>old</body></html>', 'utf8');
+    fs.writeFileSync(path.join(distDir, 'Redirect.gs'), 'function redirectResponse_() {}', 'utf8');
+    expect(fs.readdirSync(distDir)).toContain('Index.html');
+    run();
+    // readdirSync は実際に保存されている名前を返す。上書きでは Index.html が残ってしまうので、小文字の index.html であることまで確認する
+    expect(fs.readdirSync(distDir).sort()).toEqual(['Code.gs', 'appsscript.json', 'index.html']);
+    expect(fs.readFileSync(path.join(distDir, 'index.html'), 'utf8')).toContain('old');
+    expect(fs.readFileSync(path.join(distDir, 'index.html'), 'utf8')).toContain('<head><base target="_top">');
+    // 関数の二重定義にならない（Code.gs 1 本に doGet とリダイレクト関数が 1 回ずつ）
+    const code = fs.readFileSync(path.join(distDir, 'Code.gs'), 'utf8');
+    expect(code.match(/function redirectResponse_\(/g)).toHaveLength(1);
+    expect(code.match(/function doGet\(/g)).toHaveLength(1);
+  });
+
+  it('index.html に <? があれば警告だけ出して続行', () => {
+    fs.writeFileSync(path.join(distDir, 'index.html'),'<html><head></head><body><script>var a="<?";</script></body></html>', 'utf8');
     const r = run();
     expect(r.warnings).toHaveLength(1);
     expect(r.warnings[0]).toMatch(/<\?/);
@@ -216,7 +235,7 @@ describe('CLI', () => {
     try {
       const dist = path.join(tmp, 'dist');
       fs.mkdirSync(dist);
-      fs.writeFileSync(path.join(dist, 'Index.html'), '<html><head></head><body></body></html>', 'utf8');
+      fs.writeFileSync(path.join(dist, 'index.html'),'<html><head></head><body></body></html>', 'utf8');
       const env = { ...process.env, AUDIO_SPLITTER_REDIRECT_URL: DEST };
       delete env.AUDIO_SPLITTER_ICON_URL;
       const r = spawnSync(process.execPath, [path.join(HERE, 'bundle-gas.mjs'), '--dist', dist, '--gas', REAL_GAS_DIR, '--icon-url', FAKE_ID], { env, encoding: 'utf8' });

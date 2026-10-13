@@ -3,10 +3,9 @@
 # ※ このファイルは BOM 付き UTF-8 で保存すること（Windows PowerShell 5.1 が日本語を正しく読むため）。
 #    BOM が無いと 5.1 は既定の文字コード（日本語 Windows では Shift_JIS）で読み、構文エラーになる。
 #
-# npm run build で dist/Index.html を作り、scripts/bundle-gas.mjs で dist/ に GAS 用ファイルを揃え、clasp で push / deploy する。
-#   dist/Index.html       … vite の成果物（単一 HTML。<head> 直後に <base target="_top"> を挿入）
-#   dist/Code.gs          … gas/Code.gs（-IconUrl / -RedirectUrl を指定したときだけ焼き込む）
-#   dist/Redirect.gs      … gas/Redirect.gs
+# npm run build で dist/index.html を作り、scripts/bundle-gas.mjs で dist/ に GAS 用ファイルを揃え、clasp で push / deploy する。
+#   dist/index.html       … vite の成果物（単一 HTML。<head> 直後に <base target="_top"> を挿入）
+#   dist/Code.gs          … gas/Code.gs（doGet とリダイレクト処理。-IconUrl / -RedirectUrl を指定したときだけ焼き込む）
 #   dist/appsscript.json  … gas/appsscript.json（-ExecuteAs / -Access 指定時はその項目だけ書き換え）
 #
 # Usage: .\deploy.ps1 [-Stage <bundle|push|deploy>] [-Test]
@@ -157,8 +156,8 @@ function Show-Help {
     @'
 Usage: .\deploy.ps1 [options]
 
-npm run build で dist/Index.html を作り、scripts/bundle-gas.mjs で dist/ に
-Index.html / Code.gs / Redirect.gs / appsscript.json を揃え、clasp で push / deploy します。
+npm run build で dist/index.html を作り、scripts/bundle-gas.mjs で dist/ に
+index.html / Code.gs / appsscript.json を揃え、clasp で push / deploy します。
 既定（-Stage deploy）は push + デプロイまで行います。
 
 Options:
@@ -267,8 +266,8 @@ if ($WhatIf) {
     $n = 1
     if ($Test) { Write-Host "  $n. npm test を実行（失敗したら中止）"; $n++ }
     Write-Host "  $n. node_modules が無ければ npm install"; $n++
-    Write-Host "  $n. npm run build で dist/Index.html を生成"; $n++
-    Write-Host "  $n. node scripts/bundle-gas.mjs で dist/ に Index.html / Code.gs / Redirect.gs / appsscript.json を揃える"; $n++
+    Write-Host "  $n. npm run build で dist/index.html を生成"; $n++
+    Write-Host "  $n. node scripts/bundle-gas.mjs で dist/ に index.html / Code.gs / appsscript.json を揃える"; $n++
     if ($ResolvedIconUrl -ne "") {
         Write-Host "  $n. タブのアイコン（$ResolvedIconUrl）を dist/Code.gs に焼き込む予定"
     } else {
@@ -346,11 +345,10 @@ try {
         exit 1
     }
 
-    $IndexPath = Join-Path $DistDir "Index.html"
+    $IndexPath = Join-Path $DistDir "index.html"
     $CodePath = Join-Path $DistDir "Code.gs"
-    $RedirectPath = Join-Path $DistDir "Redirect.gs"
     $ManifestPath = Join-Path $DistDir "appsscript.json"
-    foreach ($f in @($IndexPath, $CodePath, $RedirectPath, $ManifestPath)) {
+    foreach ($f in @($IndexPath, $CodePath, $ManifestPath)) {
         if (-not (Test-Path $f)) {
             Write-Host "[NG] 成果物が見つかりません: $f" -ForegroundColor Red
             exit 1
@@ -380,7 +378,7 @@ try {
 
     Write-Host ""
     Write-Host "[OK] dist/ の準備完了: $DistDir" -ForegroundColor Green
-    foreach ($f in @($IndexPath, $CodePath, $RedirectPath, $ManifestPath)) {
+    foreach ($f in @($IndexPath, $CodePath, $ManifestPath)) {
         Write-Host ("   {0,-18} {1,10:N1} KB" -f (Split-Path $f -Leaf), ((Get-Item $f).Length / 1KB))
     }
 

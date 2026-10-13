@@ -1,4 +1,4 @@
-// gas/Redirect.gs（と gas/Code.gs の doGet）を node:vm で読み込み、GAS のサービスを模擬して確認する。
+// gas/Code.gs（doGet とリダイレクト関数が 1 本に入っている）を node:vm で読み込み、GAS のサービスを模擬して確認する。
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -42,7 +42,6 @@ function load(env = {}) {
   });
   const code = bakeCodeGs(read('Code.gs'), { iconUrl: env.icon ?? '', redirectUrl: env.baked ?? '' });
   vm.runInContext(code, ctx, { filename: 'Code.gs' });
-  vm.runInContext(read('Redirect.gs'), ctx, { filename: 'Redirect.gs' });
   return { ctx, calls };
 }
 
@@ -185,7 +184,7 @@ describe('redirectResponse_ / doGet', () => {
     const { ctx, calls } = load();
     const out = ctx.doGet(e);
     expect(out.kind).toBe('file');
-    expect(calls.file).toEqual(['Index']);
+    expect(calls.file).toEqual(['index']);
     expect(calls.html).toHaveLength(0);
     expect(out.title).toBe('音声分割');
     expect(calls.favicon).toHaveLength(0);

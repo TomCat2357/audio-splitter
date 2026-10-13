@@ -8,13 +8,12 @@ GAS は HTML を配信するだけで、音声処理はすべてブラウザ内�
 
 | ファイル | 役割 |
 | --- | --- |
-| `gas/Code.gs` | `doGet`。冒頭の `APP_ICON_URL_` / `REDIRECT_URL_`（2 行）はビルド時に `dist/` 側でだけ置換される |
-| `gas/Redirect.gs` | 旧デプロイ → 新デプロイへのリダイレクト |
+| `gas/Code.gs` | `doGet` と、旧デプロイ → 新デプロイへのリダイレクト処理（1 ファイル）。冒頭の `APP_ICON_URL_` / `REDIRECT_URL_`（2 行）はビルド時に `dist/` 側でだけ置換される |
 | `gas/appsscript.json` | マニフェスト（`executeAs: USER_DEPLOYING` / `access: MYSELF`。`oauthScopes` は書かない） |
 | `scripts/bundle-gas.mjs` | `dist/` を clasp が push できる形に仕上げる（`gas/` のソースは書き換えない） |
 | `deploy.ps1` | ビルド → 組み立て → `clasp push` → `clasp deploy` |
 
-`dist/` には `Index.html`（vite の成果物。`<head>` 直後に `<base target="_top">` を挿入）、`Code.gs`、`Redirect.gs`、`appsscript.json` の 4 ファイルが揃います。`dist/` は git に入りません。
+`dist/` には `index.html`（vite の成果物。`<head>` 直後に `<base target="_top">` を挿入）、`Code.gs`、`appsscript.json` の 3 ファイルが揃います。`dist/` は git に入りません。
 
 ## 初回の準備
 

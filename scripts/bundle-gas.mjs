@@ -1,12 +1,13 @@
-// dist/Index.html（vite build の成果物）を、clasp が push できる形に仕上げる。
+// dist/index.html（vite build の成果物）を、clasp が push できる形に仕上げる。
 //
 //   node scripts/bundle-gas.mjs [--icon-url <URL or ID>] [--redirect-url <URL>] [--dist <dir>] [--gas <dir>]
 //
 // やること:
-//   - gas/*.gs を dist/ にコピー（Code.gs のプレースホルダー行だけ置換。gas/ のソースは書き換えない）
+//   - gas/*.gs（現在は Code.gs 1 本）を dist/ にコピー（Code.gs のプレースホルダー行だけ置換。gas/ のソースは書き換えない）
 //   - gas/appsscript.json を dist/ にコピー
-//   - dist/Index.html の <head> 直後に <base target="_top"> を挿入（二重には入れない）
-//   - dist/ 直下の前回の残骸（.gs / .json / .html で今回の成果物でないもの）を削除
+//   - dist/index.html の <head> 直後に <base target="_top"> を挿入（二重には入れない）
+//   - dist/ 直下の前回の残骸（.gs / .json / .html で今回の成果物でないもの）を、成果物を書く前に削除
+//     （大文字小文字を区別しない Windows で、古い Index.html などが index.html の名前を引き継いで残らないようにするため、削除を先にする）
 //   - 出力した .gs を構文チェック
 // 値の入力元: CLI 引数（--icon-url / --redirect-url）> 環境変数（AUDIO_SPLITTER_ICON_URL / AUDIO_SPLITTER_REDIRECT_URL）。
 // 依存パッケージなし（Node 標準のみ）。
@@ -61,7 +62,7 @@ export function normalizeIconUrl(value) {
 
 /**
  * リダイレクト先（新しいデプロイの URL）を決める。空は ''（焼き込まない）。不正は例外。
- * https://script.google.com/ で始まり、デプロイ ID（/s/<ID>）を取り出せる形だけ受け付ける（gas/Redirect.gs の redirectDeployId_ と同じ判定）。
+ * https://script.google.com/ で始まり、デプロイ ID（/s/<ID>）を取り出せる形だけ受け付ける（gas/Code.gs の redirectDeployId_ と同じ判定）。
  * 値は Code.gs にシングルクォートの文字列リテラルとして埋め込まれるため、引用符・空白・バックスラッシュ・山括弧などを含む値は不可。
  */
 export function normalizeRedirectUrl(value) {
@@ -92,7 +93,7 @@ export function bakeCodeGs(source, { iconUrl = '', redirectUrl = '' } = {}) {
 export function insertBaseTag(html) {
   if (BASE_TAG_RE.test(html)) return html;
   const m = HEAD_OPEN_RE.exec(html);
-  if (!m) throw new Error('Index.html に <head> 開始タグが見つかりません。');
+  if (!m) throw new Error('index.html に <head> 開始タグが見つかりません。');
   const at = m.index + m[0].length;
   return html.slice(0, at) + BASE_TAG + html.slice(at);
 }
@@ -101,7 +102,7 @@ export function insertBaseTag(html) {
  * dist/ を組み立てる。
  * @param {object} [opts]
  * @param {string} [opts.gasDir] gas/ のソースのディレクトリ
- * @param {string} [opts.distDir] vite の出力先（Index.html が既にあること）
+ * @param {string} [opts.distDir] vite の出力先（index.html が既にあること）
  * @param {string} [opts.iconUrl] 未指定なら環境変数 AUDIO_SPLITTER_ICON_URL
  * @param {string} [opts.redirectUrl] 未指定なら環境変数 AUDIO_SPLITTER_REDIRECT_URL
  * @param {object} [opts.env] 環境変数（テスト用。既定は process.env）
@@ -115,7 +116,7 @@ export function bundleGas(opts = {}) {
   const redirectUrl = normalizeRedirectUrl(opts.redirectUrl !== undefined ? opts.redirectUrl : env.AUDIO_SPLITTER_REDIRECT_URL);
   const warnings = [];
 
-  const indexPath = path.join(distDir, 'Index.html');
+  const indexPath = path.join(distDir, 'index.html');
   if (!fs.existsSync(indexPath)) throw new Error(`${indexPath} がありません。先に npm run build を実行してください。`);
   if (!fs.existsSync(gasDir)) throw new Error(`${gasDir} がありません。`);
 
@@ -135,17 +136,20 @@ export function bundleGas(opts = {}) {
   outputs.set('appsscript.json', fs.readFileSync(manifestPath, 'utf8'));
   const html = fs.readFileSync(indexPath, 'utf8');
   if (html.includes('<?')) {
-    warnings.push('Index.html に "<?" が含まれています。createHtmlOutputFromFile はテンプレート評価をしないので通常は問題ありませんが、createTemplateFromFile に変えると壊れます。');
+    warnings.push('index.html に "<?" が含まれています。createHtmlOutputFromFile はテンプレート評価をしないので通常は問題ありませんが、createTemplateFromFile に変えると壊れます。');
   }
-  outputs.set('Index.html', insertBaseTag(html));
+  outputs.set('index.html', insertBaseTag(html));
 
-  for (const [name, content] of outputs) fs.writeFileSync(path.join(distDir, name), content, 'utf8');
-
-  // 前回の残骸（dist/ 直下の .gs / .json / .html で今回の成果物でないもの）を削除。サブディレクトリや他の種別には触れない
+  // 前回の残骸（dist/ 直下の .gs / .json / .html で今回の成果物でないもの）を削除。サブディレクトリや他の種別には触れない。
+  // 名前は大文字小文字まで厳密に比較する。Windows では古い Index.html に index.html を上書きすると名前が Index.html のまま残るので、
+  // 「綴りが違うものは先に消し、そのあと書く」順にして、ファイル名が必ず小文字の index.html になるようにする。
+  // （index.html の内容は上で読み込み済みなので、先に消しても失われない）
   for (const ent of fs.readdirSync(distDir, { withFileTypes: true })) {
     if (!ent.isFile() || outputs.has(ent.name)) continue;
     if (MANAGED_EXTS.has(path.extname(ent.name).toLowerCase())) fs.rmSync(path.join(distDir, ent.name));
   }
+
+  for (const [name, content] of outputs) fs.writeFileSync(path.join(distDir, name), content, 'utf8');
 
   const files = [...outputs.keys()].map((name) => ({ name, bytes: fs.statSync(path.join(distDir, name)).size }));
   return { files, iconBaked: iconUrl !== '', redirectBaked: redirectUrl !== '', warnings };
