@@ -1,5 +1,4 @@
-﻿#Requires -Version 5.1
-# 音声分割 ビルド/デプロイスクリプト (Windows PowerShell 5.1 以降 / PowerShell 7 両対応)
+﻿# 音声分割 ビルド/デプロイスクリプト (Windows PowerShell 5.1 以降 / PowerShell 7 両対応)
 #
 # ※ このファイルは BOM 付き UTF-8 で保存すること（Windows PowerShell 5.1 が日本語を正しく読むため）。
 #    BOM が無いと 5.1 は既定の文字コード（日本語 Windows では Shift_JIS）で読み、構文エラーになる。
@@ -32,6 +31,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# #Requires ステートメントは使わない（実行環境によってはそれだけで起動を拒否されるため）。
+# 動作確認は Windows PowerShell 5.1 と PowerShell 7 で行っている。それより古い場合は警告だけ出して続行する。
+if ($PSVersionTable.PSVersion -lt [version]"5.1") {
+    Write-Host "[警告] PowerShell $($PSVersionTable.PSVersion) で実行しています。動作確認は 5.1 以降で行っています。" -ForegroundColor Yellow
+}
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $DeployStartTime = Get-Date
 $RepoRoot = $PSScriptRoot
@@ -223,7 +228,7 @@ function ConvertTo-NormalizedValue {
     param([string]$Value, [string]$Function, [string]$Name)
     if ($Value.Trim() -eq "") { return "" }
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "$Name の検証に node が必要です（Node.js をインストールしてください）。" }
-    $moduleUrl = ([System.Uri]::new($BundleScript)).AbsoluteUri
+    $moduleUrl = (New-Object System.Uri($BundleScript)).AbsoluteUri
     $script = "const m=await import(process.argv[1]);try{process.stdout.write(m[process.argv[2]](process.argv[3]))}catch(e){process.stderr.write(e.message);process.exit(1)}"
     $res = Invoke-Native -Exe "node" -Arguments @("--input-type=module", "-e", $script, $moduleUrl, $Function, $Value)
     if ($res.ExitCode -ne 0) { throw "$Name が不正です: $($res.Output.Trim())" }

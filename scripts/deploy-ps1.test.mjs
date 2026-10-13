@@ -18,10 +18,10 @@ describe('deploy.ps1 の Windows PowerShell 5.1 互換', () => {
     expect([...bytes.subarray(3, 6)]).not.toEqual([0xef, 0xbb, 0xbf]);
   });
 
-  it('#Requires -Version 5.1 である', () => {
-    const text = bytes.toString('utf8').replace(/^\uFEFF/, '');
-    expect(text).toMatch(/^#Requires -Version 5\.1\r?$/m);
-    expect(text).not.toMatch(/^#Requires -Version 7/m);
+  // #Requires があると、実行環境によってはそれだけで起動を拒否される。版の確認はスクリプト内の警告で行う。
+  it('#Requires ステートメントを含まない', () => {
+    const text = bytes.toString('utf8');
+    expect(text).not.toMatch(/^\s*#\s*requires\b/im);
   });
 
   it.skipIf(!hasWindowsPowerShell())('Windows PowerShell 5.1 の構文解析器でエラーが 0 件', () => {
