@@ -23,9 +23,16 @@ npm run fixtures   # test-fixtures/ に 65 秒のテスト音声(wav/m4a/mp3)を
 
 ## Google Apps Script に載せる
 
-GAS は配信手段として使うだけで、音声処理は行いません。
+GAS は配信と Google ドライブの窓口として使い、音声処理は行いません（処理はすべてブラウザ内）。
 
-> GAS 上での表示・音声ファイルの読み込み・ダウンロードの動作は**未確認**です（clasp での push / deploy は、まだ誰も実行していません）。詳細は [docs/DEPLOY.md](docs/DEPLOY.md)。
+> GAS 上での表示・音声ファイルの読み込み・ダウンロード・**Google ドライブ連携（承認画面、一覧、転送速度、保存）の動作は未確認**です（clasp での push / deploy は、まだ誰も実行していません）。詳細は [docs/DEPLOY.md](docs/DEPLOY.md)。
+
+**Google ドライブ連携（要点）**
+
+- 既定の構成は「アクセスしているユーザーとして実行」（`USER_ACCESSING`）。利用者それぞれが自分のドライブを開き、初回に承認画面が出ます。`gas/appsscript.json` を変えたので、**次回の push は `-ForcePush` が必要**です。
+- 「デプロイしたユーザーとして実行」（`-ExecuteAs deploying`）にすると、有効のままではアクセスした全員がデプロイした人のドライブを操作できてしまうため、**Drive 連携は自動で無効**になります（ローカルファイルの分割は使えます）。ログイン不要の公開（`-Access anonymous`）は、この構成（`-ExecuteAs deploying`）でだけ指定できます。
+- Drive に対して行うのは、読み取りと、フォルダ・ファイルの**新規作成だけ**です（上書き・削除はしません）。転送は 8 MiB 単位、1 ファイル 500 MB までです。
+- 権限、仕組み、上限の詳細は [docs/DEPLOY.md](docs/DEPLOY.md) の「Google ドライブ連携」を参照してください。
 
 ### 初回の準備
 
@@ -49,8 +56,8 @@ GAS は配信手段として使うだけで、音声処理は行いません。
 | `-Test` | ビルドの前に `npm test` |
 | `-IconUrl <URL/ID>` | タブのアイコン。Drive の URL / ファイル ID / https の画像 URL。Drive の画像は「リンクを知っている全員」に共有が必要。変わるのはタブのアイコンだけで、反映は再デプロイ後 |
 | `-RedirectUrl <URL>` | 旧デプロイを開いた人を誘導する新しいデプロイの URL |
-| `-ExecuteAs deploying\|accessing` | 実行ユーザー（指定時のみ `appsscript.json` を書き換え） |
-| `-Access myself\|domain\|anyone\|anonymous` | 公開範囲（指定時のみ書き換え。既定は自分のみ。`anyone` / `anonymous` は警告を表示） |
+| `-ExecuteAs deploying\|accessing` | 実行ユーザー（指定時のみ `appsscript.json` を書き換え。既定は `accessing`。`deploying` では Drive 連携が自動で無効になる） |
+| `-Access myself\|domain\|anyone\|anonymous` | 公開範囲（指定時のみ書き換え。既定は自分のみ。`anyone` / `anonymous` は警告を表示。`anonymous` は `-ExecuteAs deploying` が必要） |
 | `-ForcePush` | `clasp push --force`（push がスキップされたときに） |
 | `-WhatIf` / `-Help` | ドライラン / ヘルプ |
 

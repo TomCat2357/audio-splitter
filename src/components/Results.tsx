@@ -1,3 +1,4 @@
+import { folderUrl } from '../lib/drivePlaces';
 import { formatBytes, formatTime } from '../lib/plan';
 import type { OutputPart } from '../lib/types';
 
@@ -6,14 +7,107 @@ export interface ResultItem {
   url: string;
 }
 
+/** Google ドライブへの保存の状態 */
+export type SaveState =
+  | { status: 'idle' }
+  | { status: 'saving'; index: number; total: number; percent: number; folderName: string }
+  | { status: 'done'; count: number; folder: { id: string; name: string } }
+  | {
+      status: 'stopped';
+      reason: 'aborted' | 'error';
+      message?: string;
+      saved: number;
+      total: number;
+      folder: { id: string; name: string };
+    };
+
+export interface DriveSaveProps {
+  state: SaveState;
+  /** 分割の実行中などで保存できないとき true */
+  disabled: boolean;
+  onSave: () => void;
+  onCancel: () => void;
+}
+
 interface Props {
   items: ResultItem[];
   zipping: boolean;
   zipError: string | null;
   onZip: () => void;
+  /** Drive が使えるときだけ渡す（null なら Drive 関連は何も表示しない） */
+  drive?: DriveSaveProps | null;
 }
 
-export function Results({ items, zipping, zipError, onZip }: Props) {
+function FolderLink({ folder }: { folder: { id: string; name: string } }) {
+  // GAS の iframe の中なので、別タブで開く
+  return (
+    <a href={folderUrl(folder.id)} target="_blank" rel="noopener noreferrer" data-testid="drive-save-link">
+      ドライブで「{folder.name}」を開く
+    </a>
+  );
+}
+
+function DriveSaveStatus({ drive }: { drive: DriveSaveProps }) {
+  const s = drive.state;
+  if (s.status === 'saving') {
+    const text = `${Math.min(s.index + 1, s.total)} / ${s.total} 個目を保存中（全体の ${s.percent}%）`;
+    return (
+      <div className="drive-save-progress" data-testid="drive-save-progress">
+        <div className="progress-wrap">
+          <div
+            className="progress"
+            role="progressbar"
+            aria-label="Google ドライブへの保存の進み具合"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={s.percent}
+            aria-valuetext={text}
+          >
+            <div className="progress-bar" style={{ width: `${s.percent}%` }} />
+          </div>
+          <p className="progress-text" role="status" data-testid="drive-save-text">
+            {text}
+          </p>
+          <p className="hint">保存先: {s.folderName}</p>
+        </div>
+        <button type="button" className="btn btn-danger" onClick={drive.onCancel} data-testid="drive-save-cancel">
+          中止
+        </button>
+      </div>
+    );
+  }
+  if (s.status === 'done') {
+    return (
+      <p className="msg msg-ok" role="status" data-testid="drive-save-done">
+        Google ドライブの「{s.folder.name}」に {s.count} 個を保存しました。 <FolderLink folder={s.folder} />
+      </p>
+    );
+  }
+  if (s.status === 'stopped') {
+    const head =
+      s.reason === 'aborted'
+        ? `保存を中止しました。${s.total} 個のうち ${s.saved} 個を保存しました。`
+        : `保存に失敗しました。${s.total} 個のうち ${s.saved} 個を保存したところで止まりました。${s.message ?? ''}`;
+    return (
+      <p
+        className={`msg ${s.reason === 'aborted' ? 'msg-warn' : 'msg-error'}`}
+        role="alert"
+        data-testid="drive-save-stopped"
+      >
+        {head}
+        {s.saved > 0 && (
+          <>
+            {' '}
+            保存できた分は「{s.folder.name}」にあります。 <FolderLink folder={s.folder} />
+          </>
+        )}
+      </p>
+    );
+  }
+  return null;
+}
+
+export function Results({ items, zipping, zipError, onZip, drive }: Props) {
   if (items.length === 0) return null;
   const total = items.reduce((s, r) => s + r.part.blob.size, 0);
   return (
@@ -23,10 +117,24 @@ export function Results({ items, zipping, zipError, onZip }: Props) {
         <p className="results-total" data-testid="results-total">
           {items.length} 個・合計 {formatBytes(total)}
         </p>
-        <button type="button" className="btn btn-primary" onClick={onZip} disabled={zipping} data-testid="zip-button">
-          {zipping ? 'ZIP を作成中…' : 'すべて ZIP で保存'}
-        </button>
+        <div className="results-actions">
+          <button type="button" className="btn btn-primary" onClick={onZip} disabled={zipping} data-testid="zip-button">
+            {zipping ? 'ZIP を作成中…' : 'すべて ZIP で保存'}
+          </button>
+          {drive && (
+            <button
+              type="button"
+              className="btn"
+              onClick={drive.onSave}
+              disabled={drive.disabled || drive.state.status === 'saving'}
+              data-testid="drive-save-button"
+            >
+              {drive.state.status === 'done' ? 'もう一度 Google ドライブに保存' : 'Google ドライブに保存'}
+            </button>
+          )}
+        </div>
       </div>
+      {drive && <DriveSaveStatus drive={drive} />}
       {zipping && (
         <p className="msg msg-info" role="status" data-testid="zip-status">
           ZIP を作成しています。しばらくお待ちください。

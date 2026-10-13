@@ -24,6 +24,27 @@ describe('deploy.ps1 の Windows PowerShell 5.1 互換', () => {
     expect(text).not.toMatch(/^\s*#\s*requires\b/im);
   });
 
+  it('改行は LF だけ（CR を含まない）', () => {
+    expect(bytes.includes(0x0d)).toBe(false);
+  });
+
+  // PowerShell 7 でしか使えない構文は、5.1 で構文エラーになる。コメント行以外を粗く検査する（5.1 の構文解析テストが本命）
+  it('三項演算子・?? ・?. ・&& / || ・::new() を使わない', () => {
+    const code = bytes.toString('utf8').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+    expect(code).not.toMatch(/\?\?/);
+    expect(code).not.toMatch(/\?\./);
+    expect(code).not.toMatch(/&&|\|\|/);
+    expect(code).not.toMatch(/::new\(/);
+    expect(code).not.toMatch(/\$\w+\s*\?\s*\$|\)\s*\?\s*\S+\s*:\s*\S+/);
+  });
+
+  it('executeAs / access の判定を持たない（bundle-gas.mjs に一本化）', () => {
+    const text = bytes.toString('utf8');
+    expect(text).not.toMatch(/ConvertTo-Json -Depth/);
+    expect(text).not.toContain('Set-WebappManifest');
+    expect(text).not.toMatch(/"USER_DEPLOYING"|"USER_ACCESSING"/);
+  });
+
   it.skipIf(!hasWindowsPowerShell())('Windows PowerShell 5.1 の構文解析器でエラーが 0 件', () => {
     // パスは日本語・空白を含むので、コマンド文字列に埋め込まず環境変数で渡す
     const command =

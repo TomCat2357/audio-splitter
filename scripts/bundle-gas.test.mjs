@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { normalizeIconUrl, normalizeRedirectUrl, bundleGas, insertBaseTag, parseArgs } from './bundle-gas.mjs';
+import { normalizeIconUrl, normalizeRedirectUrl, bundleGas, insertBaseTag, parseArgs, resolveWebapp, buildManifest, planDeploy, normalizeDrive, DRIVE_SCOPES } from './bundle-gas.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REAL_GAS_DIR = path.join(HERE, '..', 'gas');
@@ -96,6 +96,7 @@ describe('insertBaseTag', () => {
 describe('parseArgs', () => {
   it('--key value と --key=value', () => {
     expect(parseArgs(['--icon-url', 'a', '--redirect-url=b'])).toEqual({ iconUrl: 'a', redirectUrl: 'b' });
+    expect(parseArgs(['--drive', 'off', '--execute-as=deploying', '--access', 'anonymous', '--plan'])).toEqual({ drive: 'off', executeAs: 'deploying', access: 'anonymous', plan: true });
     expect(() => parseArgs(['--nope', 'x'])).toThrow(/不明/);
     expect(() => parseArgs(['--icon-url'])).toThrow(/値がありません/);
   });
@@ -229,6 +230,164 @@ describe('bundleGas（一時ディレクトリ）', () => {
   });
 });
 
+describe('Drive 連携の組み立て（安全装置 2・3）', () => {
+  let tmp, gasDir, distDir;
+  const run = (o = {}) => bundleGas({ gasDir, distDir, env: {}, ...o });
+  const dist = (n) => fs.readFileSync(path.join(distDir, n), 'utf8');
+  const manifest = () => JSON.parse(dist('appsscript.json'));
+  const SERVICE = { userSymbol: 'Drive', serviceId: 'drive', version: 'v3' };
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bundle-gas-drive-'));
+    gasDir = path.join(tmp, 'gas');
+    distDir = path.join(tmp, 'dist');
+    fs.mkdirSync(gasDir);
+    for (const n of fs.readdirSync(REAL_GAS_DIR)) fs.writeFileSync(path.join(gasDir, n), fs.readFileSync(path.join(REAL_GAS_DIR, n)));
+    fs.mkdirSync(distDir);
+    fs.writeFileSync(path.join(distDir, 'index.html'), '<!doctype html><html><head></head><body></body></html>', 'utf8');
+  });
+  afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  it('gas/ の既定: USER_ACCESSING / MYSELF、Drive のスコープ 3 つと Drive v3 サービス、DRIVE_ENABLED_ = true', () => {
+    const src = JSON.parse(fs.readFileSync(path.join(REAL_GAS_DIR, 'appsscript.json'), 'utf8'));
+    expect(src.webapp).toEqual({ executeAs: 'USER_ACCESSING', access: 'MYSELF' });
+    expect(src.oauthScopes).toEqual(DRIVE_SCOPES);
+    expect(src.oauthScopes).toEqual([
+      'https://www.googleapis.com/auth/drive',
+      'https://www.googleapis.com/auth/script.external_request',
+      'https://www.googleapis.com/auth/userinfo.email',
+    ]);
+    expect(src.dependencies.enabledAdvancedServices).toEqual([SERVICE]);
+    expect(fs.readFileSync(path.join(REAL_GAS_DIR, 'Code.gs'), 'utf8')).toMatch(/^var DRIVE_ENABLED_ = true;$/m);
+  });
+
+  it('既定（有効）: Code.gs の DRIVE_ENABLED_ は true、マニフェストは gas/ と同じ（スコープ・サービスが残る）', () => {
+    const r = run();
+    expect(r.driveEnabled).toBe(true);
+    expect(r.driveAutoDisabled).toBe(false);
+    expect(dist('Code.gs')).toMatch(/^var DRIVE_ENABLED_ = true;$/m);
+    expect(dist('appsscript.json')).toBe(fs.readFileSync(path.join(REAL_GAS_DIR, 'appsscript.json'), 'utf8'));
+    expect(manifest().oauthScopes).toHaveLength(3);
+    expect(manifest().dependencies.enabledAdvancedServices).toEqual([SERVICE]);
+  });
+
+  it('drive: off で DRIVE_ENABLED_ が false になり、Drive のスコープとサービスが消える（スコープは明示のまま。webapp は残る）', () => {
+    const r = run({ drive: 'off' });
+    expect(r.driveEnabled).toBe(false);
+    expect(r.driveAutoDisabled).toBe(false);
+    expect(dist('Code.gs')).toMatch(/^var DRIVE_ENABLED_ = false;$/m);
+    expect(dist('Code.gs')).not.toMatch(/^var DRIVE_ENABLED_ = true;$/m);
+    const m = manifest();
+    // oauthScopes を未指定にしない（未指定だと Apps Script がコードからスコープを自動判定し、drive が付き直す）
+    expect(m.oauthScopes).toEqual(['https://www.googleapis.com/auth/userinfo.email']);
+    expect('dependencies' in m).toBe(false);
+    expect(m.webapp).toEqual({ executeAs: 'USER_ACCESSING', access: 'MYSELF' });
+    expect(m.runtimeVersion).toBe('V8');
+    expect(dist('appsscript.json')).not.toMatch(/auth\/drive|external_request|"Drive"/);
+  });
+
+  it('環境変数 AUDIO_SPLITTER_DRIVE=off でも無効になり、引数が優先する', () => {
+    run({ env: { AUDIO_SPLITTER_DRIVE: 'off' } });
+    expect(dist('Code.gs')).toMatch(/^var DRIVE_ENABLED_ = false;$/m);
+    run({ env: { AUDIO_SPLITTER_DRIVE: ' OFF ' } });
+    expect(dist('Code.gs')).toMatch(/^var DRIVE_ENABLED_ = false;$/m);
+    run({ env: { AUDIO_SPLITTER_DRIVE: 'off' }, drive: 'on' });
+    expect(dist('Code.gs')).toMatch(/^var DRIVE_ENABLED_ = true;$/m);
+    run({ env: { AUDIO_SPLITTER_DRIVE: 'on' }, drive: 'off' });
+    expect(dist('Code.gs')).toMatch(/^var DRIVE_ENABLED_ = false;$/m);
+    expect(() => run({ drive: 'maybe' })).toThrow(/on か off/);
+  });
+
+  it('DRIVE_ENABLED_ のプレースホルダー行が無いとエラー（出力もしない）', () => {
+    const src = fs.readFileSync(path.join(gasDir, 'Code.gs'), 'utf8');
+    for (const bad of [src.replace('var DRIVE_ENABLED_ = true;', ''), src.replace('var DRIVE_ENABLED_ = true;', 'var DRIVE_ENABLED_ = false;'), src.replace('var DRIVE_ENABLED_ = true;', 'var DRIVE_ENABLED_=true;')]) {
+      fs.writeFileSync(path.join(gasDir, 'Code.gs'), bad, 'utf8');
+      expect(() => run({ drive: 'off' })).toThrow(/DRIVE_ENABLED_/);
+      expect(() => run()).toThrow(/DRIVE_ENABLED_/);
+      expect(fs.existsSync(path.join(distDir, 'Code.gs'))).toBe(false);
+    }
+  });
+
+  it('executeAs が deploying: 指定が無くても Drive 連携を自動で無効にする。ログイン不要（anonymous）は組み合わせられる', () => {
+    const r = run({ executeAs: 'deploying', access: 'anonymous' });
+    expect(r).toMatchObject({ executeAs: 'USER_DEPLOYING', access: 'ANYONE_ANONYMOUS', driveEnabled: false, driveAutoDisabled: true });
+    expect(dist('Code.gs')).toMatch(/^var DRIVE_ENABLED_ = false;$/m);
+    const m = manifest();
+    expect(m.webapp).toEqual({ executeAs: 'USER_DEPLOYING', access: 'ANYONE_ANONYMOUS' });
+    expect(m.oauthScopes).toEqual(['https://www.googleapis.com/auth/userinfo.email']);
+    expect(dist('appsscript.json')).not.toMatch(/auth\/drive|external_request|"Drive"/);
+    expect('dependencies' in m).toBe(false);
+    // 明示的に on を指定しても、deploying なら有効にならない
+    const r2 = run({ executeAs: 'deploying', drive: 'on' });
+    expect(r2.driveEnabled).toBe(false);
+    expect(dist('Code.gs')).toMatch(/^var DRIVE_ENABLED_ = false;$/m);
+  });
+
+  it('gas/ のマニフェストが USER_DEPLOYING でも（-ExecuteAs 指定なしで）自動で無効になる。executeAs が無い場合も安全側で無効', () => {
+    const base = JSON.parse(fs.readFileSync(path.join(gasDir, 'appsscript.json'), 'utf8'));
+    fs.writeFileSync(path.join(gasDir, 'appsscript.json'), JSON.stringify({ ...base, webapp: { executeAs: 'USER_DEPLOYING', access: 'MYSELF' } }), 'utf8');
+    expect(run().driveAutoDisabled).toBe(true);
+    expect(dist('Code.gs')).toMatch(/^var DRIVE_ENABLED_ = false;$/m);
+    fs.writeFileSync(path.join(gasDir, 'appsscript.json'), JSON.stringify({ ...base, webapp: { access: 'MYSELF' } }), 'utf8');
+    expect(run().driveEnabled).toBe(false);
+  });
+
+  it('USER_ACCESSING と anonymous は両立しない: エラーで止まり、dist/ を書き換えない', () => {
+    fs.writeFileSync(path.join(distDir, 'Code.gs'), '// previous', 'utf8');
+    expect(() => run({ access: 'anonymous' })).toThrow(/-ExecuteAs deploying/);
+    expect(() => run({ executeAs: 'accessing', access: 'anonymous' })).toThrow(/ログイン不要/);
+    expect(dist('Code.gs')).toBe('// previous');
+    expect(fs.existsSync(path.join(distDir, 'appsscript.json'))).toBe(false);
+    expect(() => planDeploy({ gasDir, env: {}, access: 'anonymous' })).toThrow(/-ExecuteAs deploying/);
+  });
+
+  it('access: domain / anyone / myself では Drive 連携は有効のまま', () => {
+    expect(run({ access: 'domain' })).toMatchObject({ access: 'DOMAIN', driveEnabled: true });
+    expect(manifest().webapp).toEqual({ executeAs: 'USER_ACCESSING', access: 'DOMAIN' });
+    expect(manifest().oauthScopes).toHaveLength(3);
+    expect(run({ access: 'anyone', executeAs: 'accessing' })).toMatchObject({ access: 'ANYONE', driveEnabled: true });
+    expect(run({ access: 'myself' }).access).toBe('MYSELF');
+  });
+
+  it('不正な executeAs / access は例外', () => {
+    expect(() => run({ executeAs: 'everyone' })).toThrow(/executeAs/);
+    expect(() => run({ access: 'public' })).toThrow(/access/);
+  });
+
+  it('buildManifest: 元を変えず、Drive 以外のスコープ・サービスは残し、空になった項目だけ消す', () => {
+    const src = {
+      runtimeVersion: 'V8',
+      oauthScopes: [...DRIVE_SCOPES, 'https://www.googleapis.com/auth/spreadsheets'],
+      dependencies: { enabledAdvancedServices: [SERVICE, { userSymbol: 'Sheets', serviceId: 'sheets', version: 'v4' }], libraries: [{ userSymbol: 'L' }] },
+      webapp: { executeAs: 'USER_ACCESSING', access: 'MYSELF' },
+    };
+    const copy = JSON.parse(JSON.stringify(src));
+    const off = buildManifest(src, { executeAs: 'USER_ACCESSING', access: 'MYSELF', driveEnabled: false });
+    expect(src).toEqual(copy);
+    expect(off.oauthScopes).toEqual(['https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/spreadsheets']);
+    // スコープが 1 つも書かれていないマニフェストでも、無効のときは明示の一覧にする（自動判定させない）
+    const bare = buildManifest({ runtimeVersion: 'V8' }, { executeAs: 'USER_DEPLOYING', access: 'ANYONE_ANONYMOUS', driveEnabled: false });
+    expect(bare.oauthScopes).toEqual(['https://www.googleapis.com/auth/userinfo.email']);
+    expect(off.dependencies.enabledAdvancedServices).toEqual([{ userSymbol: 'Sheets', serviceId: 'sheets', version: 'v4' }]);
+    expect(off.dependencies.libraries).toHaveLength(1);
+    const on = buildManifest(src, { executeAs: 'USER_ACCESSING', access: 'DOMAIN', driveEnabled: true });
+    expect(on.oauthScopes).toEqual(src.oauthScopes);
+    expect(on.webapp.access).toBe('DOMAIN');
+  });
+
+  it('resolveWebapp / normalizeDrive', () => {
+    const m = { webapp: { executeAs: 'USER_ACCESSING', access: 'MYSELF' } };
+    expect(resolveWebapp(m)).toEqual({ executeAs: 'USER_ACCESSING', access: 'MYSELF', driveEnabled: true, driveAutoDisabled: false });
+    expect(resolveWebapp(m, { drive: 'off' })).toEqual({ executeAs: 'USER_ACCESSING', access: 'MYSELF', driveEnabled: false, driveAutoDisabled: false });
+    expect(resolveWebapp(m, { executeAs: 'deploying' })).toMatchObject({ executeAs: 'USER_DEPLOYING', driveEnabled: false, driveAutoDisabled: true });
+    expect(resolveWebapp(m, { executeAs: 'deploying', drive: 'off' })).toMatchObject({ driveEnabled: false, driveAutoDisabled: false });
+    expect(normalizeDrive(undefined)).toBe(true);
+    expect(normalizeDrive('')).toBe(true);
+    expect(normalizeDrive('Off')).toBe(false);
+    expect(() => normalizeDrive('0')).toThrow();
+  });
+});
+
 describe('CLI', () => {
   it('--dist / --gas を差し替えて実行できる（実 dist/ には触れない）', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bundle-gas-cli-'));
@@ -238,6 +397,7 @@ describe('CLI', () => {
       fs.writeFileSync(path.join(dist, 'index.html'),'<html><head></head><body></body></html>', 'utf8');
       const env = { ...process.env, AUDIO_SPLITTER_REDIRECT_URL: DEST };
       delete env.AUDIO_SPLITTER_ICON_URL;
+      delete env.AUDIO_SPLITTER_DRIVE;
       const r = spawnSync(process.execPath, [path.join(HERE, 'bundle-gas.mjs'), '--dist', dist, '--gas', REAL_GAS_DIR, '--icon-url', FAKE_ID], { env, encoding: 'utf8' });
       expect(r.status, r.stderr).toBe(0);
       expect(r.stdout).toContain('アイコン: 設定あり / リダイレクト: 設定あり');
@@ -246,6 +406,37 @@ describe('CLI', () => {
       const bad = spawnSync(process.execPath, [path.join(HERE, 'bundle-gas.mjs'), '--dist', dist, '--redirect-url', 'nope'], { env, encoding: 'utf8' });
       expect(bad.status).toBe(1);
       expect(bad.stderr).toContain('[NG]');
+
+      // --drive off（引数）> AUDIO_SPLITTER_DRIVE（環境変数）
+      const off = spawnSync(process.execPath, [path.join(HERE, 'bundle-gas.mjs'), '--dist', dist, '--gas', REAL_GAS_DIR, '--drive', 'off'], { env, encoding: 'utf8' });
+      expect(off.status, off.stderr).toBe(0);
+      expect(off.stdout).toContain('Google ドライブ連携: 無効');
+      expect(fs.readFileSync(path.join(dist, 'Code.gs'), 'utf8')).toMatch(/^var DRIVE_ENABLED_ = false;$/m);
+      expect(fs.readFileSync(path.join(dist, 'appsscript.json'), 'utf8')).not.toContain('auth/drive');
+      const envOff = spawnSync(process.execPath, [path.join(HERE, 'bundle-gas.mjs'), '--dist', dist, '--gas', REAL_GAS_DIR], { env: { ...env, AUDIO_SPLITTER_DRIVE: 'off' }, encoding: 'utf8' });
+      expect(envOff.status, envOff.stderr).toBe(0);
+      expect(fs.readFileSync(path.join(dist, 'Code.gs'), 'utf8')).toMatch(/^var DRIVE_ENABLED_ = false;$/m);
+      const argWins = spawnSync(process.execPath, [path.join(HERE, 'bundle-gas.mjs'), '--dist', dist, '--gas', REAL_GAS_DIR, '--drive', 'on'], { env: { ...env, AUDIO_SPLITTER_DRIVE: 'off' }, encoding: 'utf8' });
+      expect(argWins.status, argWins.stderr).toBe(0);
+      expect(fs.readFileSync(path.join(dist, 'Code.gs'), 'utf8')).toMatch(/^var DRIVE_ENABLED_ = true;$/m);
+
+      // --execute-as deploying --access anonymous は Drive 無効、--access anonymous だけなら [NG]
+      const anon = spawnSync(process.execPath, [path.join(HERE, 'bundle-gas.mjs'), '--dist', dist, '--gas', REAL_GAS_DIR, '--execute-as', 'deploying', '--access', 'anonymous'], { env, encoding: 'utf8' });
+      expect(anon.status, anon.stderr).toBe(0);
+      expect(JSON.parse(fs.readFileSync(path.join(dist, 'appsscript.json'), 'utf8')).webapp).toEqual({ executeAs: 'USER_DEPLOYING', access: 'ANYONE_ANONYMOUS' });
+      const before = fs.readFileSync(path.join(dist, 'appsscript.json'), 'utf8');
+      const ng = spawnSync(process.execPath, [path.join(HERE, 'bundle-gas.mjs'), '--dist', dist, '--gas', REAL_GAS_DIR, '--access', 'anonymous'], { env, encoding: 'utf8' });
+      expect(ng.status).toBe(1);
+      expect(ng.stderr).toContain('[NG]');
+      expect(fs.readFileSync(path.join(dist, 'appsscript.json'), 'utf8')).toBe(before);
+
+      // --plan: 何も書かず JSON を 1 行出す
+      const planBefore = fs.readdirSync(dist).sort();
+      const plan = spawnSync(process.execPath, [path.join(HERE, 'bundle-gas.mjs'), '--plan', '--gas', REAL_GAS_DIR, '--dist', dist, '--execute-as', 'deploying'], { env, encoding: 'utf8' });
+      expect(plan.status, plan.stderr).toBe(0);
+      expect(JSON.parse(plan.stdout.trim())).toEqual({ executeAs: 'USER_DEPLOYING', access: 'MYSELF', driveEnabled: false, driveAutoDisabled: true });
+      expect(fs.readdirSync(dist).sort()).toEqual(planBefore);
+      expect(fs.readFileSync(path.join(dist, 'appsscript.json'), 'utf8')).toBe(before);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
