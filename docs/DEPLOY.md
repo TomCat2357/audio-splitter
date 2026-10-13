@@ -27,7 +27,7 @@ GAS は HTML を配信するだけで、音声処理はすべてブラウザ内�
 
 `.clasp.json` と `.gas-deployment.json` は git に入りません（`.gitignore` 済み）。
 
-## `deploy.ps1`（PowerShell 7）
+## `deploy.ps1`（Windows PowerShell 5.1 以降。PowerShell 7 でも可）
 
 ```
 ./deploy.ps1                       # ビルド + push + デプロイ（既定は -Stage deploy）
@@ -35,6 +35,8 @@ GAS は HTML を配信するだけで、音声処理はすべてブラウザ内�
 ./deploy.ps1 -WhatIf               # 実行予定を並べるだけ（ファイル変更・外部コマンドなし）
 ./deploy.ps1 -Help
 ```
+
+Windows PowerShell 5.1 で実行ポリシーによりスクリプトの実行が止められる場合は、`powershell -ExecutionPolicy Bypass -File .\deploy.ps1 ...` のように実行する（PowerShell 7 なら `pwsh -ExecutionPolicy Bypass -File .\deploy.ps1 ...`）。
 
 | パラメータ | 意味 |
 | --- | --- |

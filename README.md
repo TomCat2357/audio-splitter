@@ -38,7 +38,7 @@ GAS は配信手段として使うだけで、音声処理は行いません。
 ### デプロイ
 
 ```
-./deploy.ps1                 # ビルド + clasp push + デプロイ（PowerShell 7。既定は -Stage deploy）
+./deploy.ps1                 # ビルド + clasp push + デプロイ（Windows PowerShell 5.1 以降。PowerShell 7 でも可。既定は -Stage deploy）
 ./deploy.ps1 -Stage bundle   # dist/ を作るだけ（clasp 不要）
 ./deploy.ps1 -WhatIf         # 実行予定を表示するだけ
 ```

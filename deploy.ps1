@@ -1,5 +1,8 @@
-#Requires -Version 7
-# 音声分割 ビルド/デプロイスクリプト (PowerShell 7)
+﻿#Requires -Version 5.1
+# 音声分割 ビルド/デプロイスクリプト (Windows PowerShell 5.1 以降 / PowerShell 7 両対応)
+#
+# ※ このファイルは BOM 付き UTF-8 で保存すること（Windows PowerShell 5.1 が日本語を正しく読むため）。
+#    BOM が無いと 5.1 は既定の文字コード（日本語 Windows では Shift_JIS）で読み、構文エラーになる。
 #
 # npm run build で dist/Index.html を作り、scripts/bundle-gas.mjs で dist/ に GAS 用ファイルを揃え、clasp で push / deploy する。
 #   dist/Index.html       … vite の成果物（単一 HTML。<head> 直後に <base target="_top"> を挿入）
@@ -45,7 +48,7 @@ function Set-FileContentWithRetry {
     if (Test-Path $Path) {
         $fullPath = (Resolve-Path $Path).Path
     } else {
-        $fullPath = [System.IO.Path]::GetFullPath($Path, (Get-Location).Path)
+        $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     }
     for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
         try {
@@ -86,18 +89,63 @@ function Set-WebappManifest {
     }
 }
 
-# 外部コマンドを実行し、標準出力+標準エラーと終了コードを返す（stderr が $ErrorActionPreference=Stop に引っかからないようにする）
+# 外部コマンドを実行し、標準出力+標準エラーと終了コードを返す（stderr が $ErrorActionPreference=Stop に引っかからないようにする）。
+# 出力は UTF-8 として解釈し（node / clasp は UTF-8 で出力する）、終わったら元の文字コードへ戻す。
+# 5.1 では 2>&1 を通った stderr が ErrorRecord になるため、例外メッセージ（元の 1 行）の文字列へ直してから連結する。
 function Invoke-Native {
     param([Parameter(Mandatory=$true)][string]$Exe, [string[]]$Arguments = @())
     $prev = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
+    $prevEnc = $null
+    $encChanged = $false
     try {
-        $out = (& $Exe @Arguments 2>&1 | Out-String)
+        $prevEnc = [Console]::OutputEncoding
+        [Console]::OutputEncoding = $Utf8NoBom
+        $encChanged = $true
+    } catch {
+        # コンソールが無い環境では切り替えを諦めて続行する
+    }
+    try {
+        $lines = @(& $Exe @Arguments 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string]$_ }
+        })
         $code = $LASTEXITCODE
+        $out = ($lines | Out-String)
     } finally {
         $ErrorActionPreference = $prev
+        if ($encChanged) {
+            try { [Console]::OutputEncoding = $prevEnc } catch { }
+        }
     }
     return [pscustomobject]@{ Output = $out; ExitCode = $code }
+}
+
+# 出力を捕捉せず画面へそのまま流す外部コマンド実行。終了コードは $script:NativeExitCode に入る。
+# 5.1 では呼び出し側のリダイレクト（2>&1 など）を通った stderr が ErrorRecord になり、
+# $ErrorActionPreference=Stop だとスクリプトが異常終了するため、実行中だけ Continue にする。
+function Invoke-NativeLive {
+    param([Parameter(Mandatory=$true)][string]$Exe, [string[]]$Arguments = @())
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    # 呼び出し側が出力をリダイレクトしているとき、node の UTF-8 出力が化けないようにする（画面へ直接出るときは影響しない）
+    $prevEnc = $null
+    $encChanged = $false
+    try {
+        $prevEnc = [Console]::OutputEncoding
+        [Console]::OutputEncoding = $Utf8NoBom
+        $encChanged = $true
+    } catch {
+        # コンソールが無い環境では切り替えを諦めて続行する
+    }
+    try {
+        & $Exe @Arguments
+        $script:NativeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+        if ($encChanged) {
+            try { [Console]::OutputEncoding = $prevEnc } catch { }
+        }
+    }
 }
 
 function Show-Help {
@@ -175,13 +223,9 @@ function ConvertTo-NormalizedValue {
     param([string]$Value, [string]$Function, [string]$Name)
     if ($Value.Trim() -eq "") { return "" }
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "$Name の検証に node が必要です（Node.js をインストールしてください）。" }
-    $prevEnc = [Console]::OutputEncoding
-    [Console]::OutputEncoding = $Utf8NoBom # node は UTF-8 で出力する（日本語のエラーメッセージを化けさせない）
-    try {
-        $moduleUrl = ([System.Uri]::new($BundleScript)).AbsoluteUri
-        $script = "const m=await import(process.argv[1]);try{process.stdout.write(m[process.argv[2]](process.argv[3]))}catch(e){process.stderr.write(e.message);process.exit(1)}"
-        $res = Invoke-Native -Exe "node" -Arguments @("--input-type=module", "-e", $script, $moduleUrl, $Function, $Value)
-    } finally { [Console]::OutputEncoding = $prevEnc }
+    $moduleUrl = ([System.Uri]::new($BundleScript)).AbsoluteUri
+    $script = "const m=await import(process.argv[1]);try{process.stdout.write(m[process.argv[2]](process.argv[3]))}catch(e){process.stderr.write(e.message);process.exit(1)}"
+    $res = Invoke-Native -Exe "node" -Arguments @("--input-type=module", "-e", $script, $moduleUrl, $Function, $Value)
     if ($res.ExitCode -ne 0) { throw "$Name が不正です: $($res.Output.Trim())" }
     return $res.Output.Trim()
 }
@@ -263,8 +307,8 @@ try {
     # ---- テスト ----
     if ($Test) {
         Write-Host "[1/4] npm test を実行中..." -ForegroundColor Yellow
-        npm test
-        if ($LASTEXITCODE -ne 0) {
+        Invoke-NativeLive -Exe "npm" -Arguments @("test")
+        if ($script:NativeExitCode -ne 0) {
             Write-Host "[NG] テストに失敗したため中止しました" -ForegroundColor Red
             exit 1
         }
@@ -274,15 +318,15 @@ try {
     # ---- ビルド ----
     if (-not (Test-Path (Join-Path $RepoRoot "node_modules"))) {
         Write-Host "node_modules が無いので npm install を実行します..." -ForegroundColor Yellow
-        npm install
-        if ($LASTEXITCODE -ne 0) {
+        Invoke-NativeLive -Exe "npm" -Arguments @("install")
+        if ($script:NativeExitCode -ne 0) {
             Write-Host "[NG] npm install に失敗しました" -ForegroundColor Red
             exit 1
         }
     }
     Write-Host "[2/4] npm run build を実行中..." -ForegroundColor Yellow
-    npm run build
-    if ($LASTEXITCODE -ne 0) {
+    Invoke-NativeLive -Exe "npm" -Arguments @("run", "build")
+    if ($script:NativeExitCode -ne 0) {
         Write-Host "[NG] npm run build に失敗しました" -ForegroundColor Red
         exit 1
     }
@@ -291,8 +335,8 @@ try {
     Write-Host "[3/4] dist/ を組み立て中（node scripts/bundle-gas.mjs）..." -ForegroundColor Yellow
     if ($ResolvedIconUrl -ne "") { $env:AUDIO_SPLITTER_ICON_URL = $ResolvedIconUrl } else { Remove-Item Env:AUDIO_SPLITTER_ICON_URL -ErrorAction SilentlyContinue }
     if ($ResolvedRedirectUrl -ne "") { $env:AUDIO_SPLITTER_REDIRECT_URL = $ResolvedRedirectUrl } else { Remove-Item Env:AUDIO_SPLITTER_REDIRECT_URL -ErrorAction SilentlyContinue }
-    node $BundleScript
-    if ($LASTEXITCODE -ne 0) {
+    Invoke-NativeLive -Exe "node" -Arguments @($BundleScript)
+    if ($script:NativeExitCode -ne 0) {
         Write-Host "[NG] dist/ の組み立てに失敗しました" -ForegroundColor Red
         exit 1
     }
