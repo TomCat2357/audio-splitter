@@ -158,7 +158,8 @@ Options:
                               Drive の URL / ID は https://lh3.googleusercontent.com/d/<ID>#.png に変換して dist/Code.gs に焼き込みます
                               （GAS は URL 末尾の拡張子を検査するため。末尾が拡張子でない https URL にも #.png を足します）。
                               画像が ico などのときは、値の末尾に #.ico / #.png / #.jpg / #.jpeg / #.gif を付けるとその拡張子になります。
-                              Drive のファイルは「リンクを知っている全員」に共有が必要です（README.md）。
+                              実行時にスクリプト プロパティ AUDIO_SPLITTER_ICON_URL があればそちらが優先されます
+                              （値 off で解除）。Drive のファイルは「リンクを知っている全員」に共有が必要です（README.md）。
   -RedirectUrl <URL>           旧デプロイから開かれたときの移動先（新しいデプロイの Web アプリ URL）。
                               https://script.google.com/ で始まりデプロイ ID を含む URL だけ受け付け、dist/Code.gs に焼き込みます。
                               実行時にスクリプト プロパティ AUDIO_SPLITTER_REDIRECT_URL があればそちらが優先されます
@@ -286,7 +287,7 @@ if ($WhatIf) {
     if ($ResolvedIconUrl -ne "") {
         Write-Host "  $n. タブのアイコン（$ResolvedIconUrl）を dist/Code.gs に焼き込む予定"
     } else {
-        Write-Host "  $n. タブのアイコンは指定なし（焼き込まない。Apps Script 既定のアイコン）"
+        Write-Host "  $n. タブのアイコンは指定なし（焼き込まない。スクリプト プロパティ AUDIO_SPLITTER_ICON_URL があればそれが使われる）"
     }
     $n++
     if ($ResolvedRedirectUrl -ne "") {
@@ -395,7 +396,7 @@ try {
 
     if ($ResolvedIconUrl -ne "") {
         Write-Host "[OK] dist/Code.gs にタブのアイコンを焼き込みました" -ForegroundColor Magenta
-        Write-Host "     ※ Drive の画像なら「リンクを知っている全員」の共有が必要です。反映はデプロイし直し後、ブラウザのキャッシュで遅れることがあります" -ForegroundColor DarkGray
+        Write-Host "     ※ Drive の画像なら「リンクを知っている全員」の共有が必要です。反映はデプロイし直し後、ブラウザのキャッシュで遅れることがあります。スクリプト プロパティ AUDIO_SPLITTER_ICON_URL が優先、off で解除" -ForegroundColor DarkGray
     }
     if ($ResolvedRedirectUrl -ne "") {
         Write-Host "[OK] dist/Code.gs にリダイレクト先を焼き込みました（このデプロイは開かれると移動先へ案内します。?noredirect=1 で回避、スクリプト プロパティ AUDIO_SPLITTER_REDIRECT_URL が優先、off で解除）" -ForegroundColor Magenta

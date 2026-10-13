@@ -9,6 +9,7 @@
 var DRIVE_ENABLED_ = true;
 // タブのアイコン（favicon）の URL。https のみ。空なら Apps Script 既定のアイコンのまま。
 // GAS は URL 末尾の拡張子（png / ico / jpg / gif）を検査するため、bundle-gas.mjs が末尾に '#.png' などを足す。
+// スクリプト プロパティ AUDIO_SPLITTER_ICON_URL が設定されていればそちらが優先される（下の「タブのアイコン」節を参照）。
 var APP_ICON_URL_ = '';
 // 旧デプロイから開かれたときの移動先（新しいデプロイの URL）。空なら移動しない。
 // スクリプト プロパティ AUDIO_SPLITTER_REDIRECT_URL が設定されていればそちらが優先される（下の「リダイレクト」節を参照）。
@@ -27,12 +28,19 @@ function doGet(e) {
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT);
 
-  // デプロイ時にアイコンの URL を指定したときだけ設定する（失敗しても画面は出す）
-  if (APP_ICON_URL_) {
+  // アイコンの URL は、スクリプト プロパティ（優先）か、デプロイ時の焼き込み値で決める。決まったときだけ設定する（失敗しても画面は出す）
+  var iconProp = null;
+  try { iconProp = PropertiesService.getScriptProperties().getProperty(ICON_PROP_KEY_); } catch (err) { iconProp = null; }
+  var iconUrl = iconDestination_(iconProp, APP_ICON_URL_);
+  if (iconPropInvalid_(iconProp)) {
+    // 値そのものはログに出さない
+    console.error('スクリプト プロパティ ' + ICON_PROP_KEY_ + ' の値が不正なため、アイコンを付けません');
+  }
+  if (iconUrl) {
     try {
-      output = output.setFaviconUrl(APP_ICON_URL_);
-    } catch (err) {
-      console.error('setFaviconUrl に失敗: ' + err);
+      output = output.setFaviconUrl(iconUrl);
+    } catch (err2) {
+      console.error('setFaviconUrl に失敗: ' + err2);
     }
   }
   return output;
@@ -159,6 +167,177 @@ function redirectResponse_(e) {
   } catch (err2) {
     return null;
   }
+}
+
+// ============================================================================
+// タブのアイコン（favicon）
+//
+// アイコンの URL の決め方（iconDestination_）:
+//   1. スクリプト プロパティ AUDIO_SPLITTER_ICON_URL が設定されていれば、それを使う（再デプロイなしで切り替え・解除できる）。
+//      値が off（大文字小文字・前後の空白は無視。リダイレクトと共用の REDIRECT_OFF_）なら、焼き込み値があってもアイコンを付けない（解除）。
+//      値が不正なとき（iconNormalize_ が null を返す）は、アイコンを付けない。焼き込み値には戻さない（誤設定に気づけるようにするため）。
+//      値は scripts/bundle-gas.mjs の normalizeIconUrl と同じ規則で正規化する（Drive の URL / ID → lh3 の URL、末尾に '#.png' など）。
+//   2. プロパティが未設定・空なら、焼き込み値 APP_ICON_URL_（冒頭の変数。deploy.ps1 -IconUrl。ビルド時に正規化済み）をそのまま使う。
+//   3. どちらも空ならアイコンを付けない。
+// ============================================================================
+
+var ICON_PROP_KEY_ = 'AUDIO_SPLITTER_ICON_URL';
+
+/** URL（https:// で始まる文字列）をホスト名（小文字）・パス・クエリに分ける。new URL() が失敗する形は null。GAS には URL クラスが無いので文字列操作で行う。 */
+function iconParseHttps_(url) {
+  if (!/^https:\/\//i.test(url)) return null;
+  var rest = url.slice(8).replace(/^\/+/, '');
+  var hashAt = rest.indexOf('#');
+  if (hashAt >= 0) rest = rest.slice(0, hashAt);
+  var queryAt = rest.indexOf('?');
+  var query = '';
+  if (queryAt >= 0) { query = rest.slice(queryAt + 1); rest = rest.slice(0, queryAt); }
+  var slashAt = rest.indexOf('/');
+  var auth = slashAt >= 0 ? rest.slice(0, slashAt) : rest;
+  var path = slashAt >= 0 ? rest.slice(slashAt) : '/';
+  var hostport = auth.slice(auth.lastIndexOf('@') + 1);
+  var host;
+  var port;
+  if (hostport.charAt(0) === '[') {
+    var close = hostport.indexOf(']');
+    if (close < 0) return null;
+    host = hostport.slice(0, close + 1);
+    port = hostport.slice(close + 1);
+    if (!iconIpv6Ok_(host.slice(1, -1))) return null;
+    if (port) { if (port.charAt(0) !== ':') return null; port = port.slice(1); }
+  } else {
+    var colonAt = hostport.indexOf(':');
+    host = colonAt >= 0 ? hostport.slice(0, colonAt) : hostport;
+    port = colonAt >= 0 ? hostport.slice(colonAt + 1) : '';
+    if (host.indexOf('%') >= 0) {
+      try { host = decodeURIComponent(host); } catch (err) { return null; }
+    }
+    // 非 ASCII（% デコード後）は IDNA の判定が要るので、ここでは通す
+    if (/[\x00-\x20\x7f]/.test(host) || /[#\/:<>?@\[\\\]^|%]/.test(host)) return null;
+    host = host.toLowerCase();
+    if (!iconHostOk_(host)) return null;
+  }
+  if (!host) return null;
+  if (port && (!/^\d+$/.test(port) || parseInt(port, 10) > 65535)) return null;
+  return { host: host, path: iconResolveDots_(path), query: query };
+}
+
+/** IPv6 アドレス（角括弧の中身）として正しいこと。 */
+function iconIpv6Ok_(a) {
+  var v4 = /^(.*:)(\d+\.\d+\.\d+\.\d+)$/.exec(a);
+  if (v4) {
+    var octs = v4[2].split('.');
+    for (var i = 0; i < 4; i++) if (octs[i].length > 3 || (octs[i].length > 1 && octs[i].charAt(0) === '0') || parseInt(octs[i], 10) > 255) return false;
+    a = v4[1] + '0:0';
+  }
+  var halves = a.split('::');
+  if (halves.length > 2) return false;
+  var groups = [];
+  for (var h = 0; h < halves.length; h++) if (halves[h]) groups = groups.concat(halves[h].split(':'));
+  for (var g = 0; g < groups.length; g++) if (!/^[0-9A-Fa-f]{1,4}$/.test(groups[g])) return false;
+  return halves.length === 2 ? groups.length < 8 : groups.length === 8;
+}
+
+/** ホスト名が空でなく、末尾が数字のとき（IPv4 とみなされる）は IPv4 として正しいこと。 */
+function iconHostOk_(host) {
+  if (!host) return false;
+  var labels = host.split('.');
+  if (labels.length > 1 && labels[labels.length - 1] === '') labels.pop();
+  var last = labels[labels.length - 1];
+  if (!/^(?:\d+|0[xX][0-9A-Fa-f]*)$/.test(last)) return true;
+  if (labels.length > 4) return false;
+  var nums = [];
+  for (var i = 0; i < labels.length; i++) {
+    var l = labels[i];
+    var n;
+    if (/^0[xX][0-9A-Fa-f]*$/.test(l)) n = l.length === 2 ? 0 : parseInt(l.slice(2), 16);
+    else if (/^0[0-7]+$/.test(l)) n = parseInt(l, 8);
+    else if (/^\d+$/.test(l) && !/^0\d/.test(l)) n = parseInt(l, 10);
+    else return false;
+    nums.push(n);
+  }
+  for (var j = 0; j < nums.length - 1; j++) if (nums[j] > 255) return false;
+  return nums[nums.length - 1] < Math.pow(256, 5 - nums.length);
+}
+
+/** パスの . と .. のセグメントを解決する（%2e も . として扱う。new URL() の pathname と同じ）。 */
+function iconResolveDots_(path) {
+  var segs = path.split('/');
+  var out = [];
+  for (var i = 1; i < segs.length; i++) {
+    var lower = segs[i].toLowerCase();
+    var isLast = i === segs.length - 1;
+    if (lower === '..' || lower === '.%2e' || lower === '%2e.' || lower === '%2e%2e') { out.pop(); if (isLast) out.push(''); }
+    else if (lower === '.' || lower === '%2e') { if (isLast) out.push(''); }
+    else out.push(segs[i]);
+  }
+  return '/' + out.join('/');
+}
+
+function iconDecode_(s) {
+  var t = s.replace(/\+/g, ' ');
+  try { return decodeURIComponent(t); } catch (err) { return t; }
+}
+
+/** クエリ文字列から最初の id= の値を取り出す（URLSearchParams.get('id') 相当）。無ければ ''。 */
+function iconQueryId_(query) {
+  var pairs = query.split('&');
+  for (var i = 0; i < pairs.length; i++) {
+    if (!pairs[i]) continue;
+    var eq = pairs[i].indexOf('=');
+    var k = eq >= 0 ? pairs[i].slice(0, eq) : pairs[i];
+    var v = eq >= 0 ? pairs[i].slice(eq + 1) : '';
+    if (iconDecode_(k) === 'id') return iconDecode_(v);
+  }
+  return '';
+}
+
+/**
+ * アイコンの URL を正規化する（scripts/bundle-gas.mjs の normalizeIconUrl と同じ入力に同じ結果）。
+ * 空は ''、不正は null（normalizeIconUrl は例外）。
+ */
+function iconNormalize_(value) {
+  var s = String(value == null ? '' : value).replace(/^\s+|\s+$/g, '');
+  if (!s) return '';
+  var extM = /#(\.(?:png|ico|jpe?g|gif))$/i.exec(s);
+  var ext = extM ? extM[1].toLowerCase() : '.png';
+  var body = extM ? s.slice(0, s.length - extM[0].length) : s;
+  var drive = function (id) { return 'https://lh3.googleusercontent.com/d/' + id + '#' + ext; };
+  if (/^[A-Za-z0-9_-]{20,200}$/.test(body)) return drive(body);
+  if (!/^https:\/\//i.test(s)) return null;
+  // JS 文字列リテラル・HTML 属性に入れても壊れない文字だけ許可（空白・引用符・バックスラッシュ・<> などは不可）
+  if (!/^[\x21\x23-\x26\x28-\x3b\x3d\x3f-\x5b\x5d-\x7e]+$/.test(s) || s.length > 2000) return null;
+  var u = iconParseHttps_(body);
+  if (!u) return null;
+  if (u.host === 'drive.google.com' || u.host === 'docs.google.com') {
+    var m = /\/file\/d\/([A-Za-z0-9_-]{20,200})(?:[\/?#]|$)/.exec(u.path) || /^([A-Za-z0-9_-]{20,200})$/.exec(iconQueryId_(u.query));
+    return m ? drive(m[1]) : null;
+  }
+  if (extM) return body + '#' + ext;
+  if (/\.(png|ico|jpe?g|gif)$/i.test(s)) return s;
+  if (s.indexOf('#') >= 0) return null;
+  return s + '#.png';
+}
+
+/** スクリプト プロパティの値が「設定されているが不正」か（off と空は不正ではない）。 */
+function iconPropInvalid_(propValue) {
+  var prop = String(propValue == null ? '' : propValue).replace(/^\s+|\s+$/g, '');
+  if (!prop || prop.toLowerCase() === REDIRECT_OFF_) return false;
+  return iconNormalize_(prop) === null;
+}
+
+/**
+ * アイコンの URL を決める（優先順位は上の「タブのアイコン」節のコメント）。付けないときは ''。戻り値は setFaviconUrl にそのまま渡せる。
+ * @param {*} propValue スクリプト プロパティ AUDIO_SPLITTER_ICON_URL の値
+ * @param {*} bakedValue 焼き込み値 APP_ICON_URL_
+ */
+function iconDestination_(propValue, bakedValue) {
+  var prop = String(propValue == null ? '' : propValue).replace(/^\s+|\s+$/g, '');
+  if (prop) {
+    if (prop.toLowerCase() === REDIRECT_OFF_) return '';
+    return iconNormalize_(prop) || '';
+  }
+  return String(bakedValue == null ? '' : bakedValue).replace(/^\s+|\s+$/g, '');
 }
 
 // ============================================================================
