@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.clasp.json
+.clasp.json.*
+!.clasp.json.example
+.gas-deployment.json
+.gas-deployment.json.*
+test-fixtures/
+.vite/
+.env*
+*.log
+.claude/
+.playwright-mcp/

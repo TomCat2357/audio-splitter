@@ -1,0 +1,33 @@
+{
+  "name": "audio-splitter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "fixtures": "node scripts/make-fixtures.mjs",
+    "bundle:gas": "node scripts/bundle-gas.mjs"
+  },
+  "dependencies": {
+    "@mediabunny/aac-encoder": "^1.61.4",
+    "@mediabunny/mp3-encoder": "^1.61.4",
+    "fflate": "^0.8.3",
+    "mediabunny": "^1.61.4",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "vite-plugin-singlefile": "^2.3.3",
+    "vitest": "^5.0.4"
+  }
+}

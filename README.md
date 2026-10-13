@@ -1,0 +1,81 @@
+# 音声分割
+
+会議録音などの長い音声ファイルを、ブラウザだけで分割・圧縮するアプリです。音声処理はすべてブラウザ内で行い、サーバーには送りません（[mediabunny](https://mediabunny.dev/) を使用）。配布形態は単一の HTML ファイル（`dist/Index.html`）です。
+
+## できること
+
+- **再生しながら分割位置を決める**: つまみ（シークバー）で場所を探し、「現在位置で分割」（`S` キー）で分割点を追加します。分割点はバー上のマーカーをドラッグするか、時刻を入力して調整できます。
+- **自動で分割する**: 「時間ごと」（例: 10 分ごと）、「等分」、「サイズ上限」（例: 1 ファイル 25MB 以下）。自動で決めた位置を引き継いで手動で微調整することもできます。
+- **元の音質のまま分割する**（無劣化・高速）か、**圧縮しながら分割する**（M4A または MP3、32〜192kbps、モノラル化）かを選べます。
+- 映像入りのファイル（mp4 など）からは音声だけを取り出します。
+- 結果は 1 個ずつ、またはまとめて ZIP で保存できます。
+
+## 使い方
+
+```
+npm install
+npm run dev        # 開発サーバー
+npm run build      # dist/Index.html を生成（これをブラウザで開いても動く）
+npm test           # 単体・結合テスト（vitest）
+npm run typecheck
+npm run fixtures   # test-fixtures/ に 65 秒のテスト音声(wav/m4a/mp3)を生成
+```
+
+## Google Apps Script に載せる
+
+GAS は配信手段として使うだけで、音声処理は行いません。
+
+> GAS 上での表示・音声ファイルの読み込み・ダウンロードの動作は**未確認**です（clasp での push / deploy は、まだ誰も実行していません）。詳細は [docs/DEPLOY.md](docs/DEPLOY.md)。
+
+### 初回の準備
+
+1. `npm install -g @google/clasp`
+2. `clasp login`
+3. GAS プロジェクトを用意して、リポジトリ直下に `.clasp.json` を作る
+   - 既存のプロジェクト: `.clasp.json.example` を `.clasp.json` にコピーし、`YOUR_SCRIPT_ID` を Script ID に書き換える
+   - 新規: `clasp create --type webapp --title "音声分割" --rootDir dist`
+
+### デプロイ
+
+```
+./deploy.ps1                 # ビルド + clasp push + デプロイ（PowerShell 7。既定は -Stage deploy）
+./deploy.ps1 -Stage bundle   # dist/ を作るだけ（clasp 不要）
+./deploy.ps1 -WhatIf         # 実行予定を表示するだけ
+```
+
+| パラメータ | 意味 |
+| --- | --- |
+| `-Stage bundle\|push\|deploy` | どこまで進めるか（既定 `deploy`） |
+| `-Test` | ビルドの前に `npm test` |
+| `-IconUrl <URL/ID>` | タブのアイコン。Drive の URL / ファイル ID / https の画像 URL。Drive の画像は「リンクを知っている全員」に共有が必要。変わるのはタブのアイコンだけで、反映は再デプロイ後 |
+| `-RedirectUrl <URL>` | 旧デプロイを開いた人を誘導する新しいデプロイの URL |
+| `-ExecuteAs deploying\|accessing` | 実行ユーザー（指定時のみ `appsscript.json` を書き換え） |
+| `-Access myself\|domain\|anyone\|anonymous` | 公開範囲（指定時のみ書き換え。既定は自分のみ。`anyone` / `anonymous` は警告を表示） |
+| `-ForcePush` | `clasp push --force`（push がスキップされたときに） |
+| `-WhatIf` / `-Help` | ドライラン / ヘルプ |
+
+- **`-IconUrl` / `-RedirectUrl` は、指定したデプロイにだけ焼き込まれます。** 指定しなければ焼き込まれないので、使い続けるなら毎回指定してください。
+- 初回デプロイのデプロイ ID は `.gas-deployment.json` に保存され、次回以降は同じ URL に再デプロイされます。
+- リダイレクト: スクリプト プロパティ `AUDIO_SPLITTER_REDIRECT_URL` があればそれが優先され、無ければ `-RedirectUrl` の焼き込み値を使います。プロパティの値 `off` で解除でき（再デプロイ不要）、`?noredirect=1` を付けて開くと移動しません。
+
+詳しい手順・注意点（アイコン、リダイレクトの仕様、公開範囲、OAuth スコープ）は [docs/DEPLOY.md](docs/DEPLOY.md) を参照してください。
+
+## 対応形式と制限
+
+確認できている範囲は次のとおりです（ブラウザでの確認は Chromium 系 1 種類のみ）。
+
+| 入力 | 元の音質のまま分割 | 圧縮して分割（M4A / MP3） |
+| --- | --- | --- |
+| m4a | 確認済み | 確認済み |
+| mp3 | 確認済み | 確認済み |
+| wav | 確認済み | 確認済み |
+| 映像入り mp4 | 確認済み（m4a として取り出し） | 確認済み（MP3） |
+| ogg / flac / webm など | 未確認 | 未確認 |
+
+- ogg / flac / webm などは mediabunny の対応範囲に依存し、本プロジェクトでは試していません。
+- 元の音質のままの分割は、再エンコードせずに切り出します。境界で音声 1 フレーム分（約 23ms）重なることがあります。
+- 圧縮には入力音声の読み取り（デコード）が必要で、ブラウザの WebCodecs に依存します。Chrome または Edge を推奨します。Firefox / Safari は未確認です。書き出し（エンコード）側は、ブラウザ標準で不可なら内蔵の wasm 版（AAC / MP3）に自動で切り替わります。確認に使ったブラウザは標準の AAC エンコーダを持たない環境だったため、ブラウザ標準の AAC エンコーダを使う経路は未確認です。
+- 入力ファイルは必要な範囲だけ読みますが、できあがったファイルは保存するまでメモリ上に保持します。数百 MB を超える出力では、ブラウザのメモリが不足する可能性があります（大きなファイルでの確認はしていません）。
+- 「サイズ上限」での分割は、各ファイルが上限以下になるまで自動でやり直します。
+- 配布 HTML（`dist/Index.html`）は約 2.2MB で、外部への通信はしません。ビルドした HTML をファイルとして直接開いても動くことを確認しています。
+- GAS 上での動作（表示、ファイルの保存、アイコン、リダイレクト）は未確認です。
