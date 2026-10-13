@@ -225,6 +225,7 @@ var DRIVE_MAX_TOTAL_BYTES_ = 500 * 1024 * 1024;           // 保存する 1 フ�
 var DRIVE_FALLBACK_MAX_BYTES_ = 50 * 1024 * 1024;         // DriveApp フォールバック（全体読み込み）の上限
 var DRIVE_SESSION_PREFIX_ = 'audio_splitter_up_';
 var DRIVE_SESSION_TTL_SEC_ = 21600;                       // CacheService の最大（6 時間）
+var DRIVE_DONE_TTL_SEC_ = 1800;                           // 完了済みの印を残す時間（最後のチャンクの再送に同じ結果を返すため）
 var DRIVE_RESTRICTED_CODE_ = 'DOWNLOAD_RESTRICTED';
 var DRIVE_RESTRICTED_MESSAGE_ = '所有者によりダウンロードが制限されているため、ファイルを取得できません。';
 
@@ -329,7 +330,12 @@ function driveSanitizeName_(name, fallback) {
   s = s.replace(/[\u0000-\u001F\u007F]/g, '');
   s = s.replace(/[\/\\:*?"<>|]/g, '_');
   s = s.replace(/^\s+|\s+$/g, '');
-  if (s.length > 150) s = s.slice(0, 150).replace(/\s+$/, '');
+  if (s.length > 150) {
+    // 切り詰めても拡張子は残す（拡張子から MIME を決めるので、切れると保存できなくなる）
+    var em = /\.[A-Za-z0-9]{1,10}$/.exec(s);
+    var ext = em ? em[0] : '';
+    s = s.slice(0, 150 - ext.length).replace(/\s+$/, '') + ext;
+  }
   return s || fallback;
 }
 
@@ -787,6 +793,24 @@ function driveFetchRange_(id, off, len) {
   });
 }
 
+/** 一時的な混雑・サーバーの不調を表す状態コード（再試行すれば通る見込みがあるもの） */
+function driveIsTransientStatus_(code) {
+  return code === 429 || code === 500 || code === 502 || code === 503 || code === 504;
+}
+
+/** 403 の本文が「利用回数の上限」（rateLimitExceeded / userRateLimitExceeded）か。読めなければ false。 */
+function driveIsRateLimitBody_(resp) {
+  try {
+    return /rateLimitExceeded/i.test(String(resp.getContentText() || ''));
+  } catch (e) {
+    return false;
+  }
+}
+
+function driveTransientResult_() {
+  return { error: 'Google ドライブが混み合っているか、一時的に応答がありません。しばらくしてからやり直してください。', retryable: true };
+}
+
 /**
  * ファイルの [offset, offset+length) を base64 で返す。EOF を越える分は切り詰め、offset >= size なら空データ。
  * partial: Range が効いたか（206 / 416 = true、全体を取得して slice = false）。etag: 取得中の更新（版の混在）の検出用。
@@ -808,8 +832,17 @@ function getFileChunk(fileId, offset, length) {
     var etag = null;
     var partial = false;
     try {
-      var r = driveFetchRange_(id, off, len);
+      var r;
+      try {
+        r = driveFetchRange_(id, off, len);
+      } catch (fe) {
+        // UrlFetchApp が例外（タイムアウト・通信エラー）: 一時的な失敗として返す。DriveApp で全体を読み直さない
+        return driveTransientResult_();
+      }
       var code = r.getResponseCode();
+      // 一時的な混雑・サーバーの不調（429 / 500 / 502 / 503 / 504）は、DriveApp で全体を読むフォールバックに入らず retryable で返す。
+      // 画面側が間隔を空けて再試行し、同時実行数も絞る。403 のうち「利用回数の上限」（rateLimitExceeded）も同じ扱い。
+      if (driveIsTransientStatus_(code) || (code === 403 && driveIsRateLimitBody_(r))) return driveTransientResult_();
       if (code !== 200 && code !== 206 && code !== 416 && typeof Drive !== 'undefined') {
         // ショートカットの ID だったときはターゲットで読み直す（普通のファイルでは余計な呼び出しをしない）
         try {
@@ -820,7 +853,10 @@ function getFileChunk(fileId, offset, length) {
             code = r.getResponseCode();
           }
         } catch (se) { /* 確かめられなければ元の応答で続ける */ }
+        if (driveIsTransientStatus_(code)) return driveTransientResult_();
       }
+      // 404（無い・見えない）は DriveApp で読んでも同じ結果なので、フォールバックせずに返す（再試行も不要）。
+      if (code === 404) return driveErrorOf_(driveFail_('ファイルまたはフォルダが見つかりません（アクセス権がない可能性もあります）。'), false);
       if (code === 206 || code === 200 || code === 416) etag = driveEtagOf_(r);
       if (code === 206) {
         bytes = r.getContent();
@@ -831,11 +867,13 @@ function getFileChunk(fileId, offset, length) {
       } else if (code === 200) {
         bytes = r.getContent().slice(off, off + len);   // Range が無視された（全体が返った）場合は自前で slice
       }
-    } catch (fe) {
-      // UrlFetchApp の失敗（通信エラー）は、下の DriveApp フォールバックで拾う
+    } catch (fe2) {
+      // 応答の読み取りに失敗した等。一時的なもの（429・5xx・通信例外）は上で返し済みなので、ここに来るのは想定外の形だけ。DriveApp で拾う
     }
     if (bytes === null) {
-      // フォールバック: DriveApp（Range 非対応環境・権限の揺れ対策）。全体を読むので上限を設ける
+      // フォールバック: DriveApp（Range 取得が使えない環境・権限の揺れ対策）。全体を読むので上限を設ける。
+      // 入るのは 400 / 401 / 403（利用回数の上限以外）/ その他の 4xx など「Range 付きの取得そのものが通らない」ときだけ。
+      // 429・5xx・通信例外は一時的なので入らない（1 チャンクごとに最大 50 MB を読み直すのを避ける）。404 は同じ結果なので入らない。
       var f2 = DriveApp.getFileById(id);
       if (f2.getSize() > DRIVE_FALLBACK_MAX_BYTES_) {
         throw new Error('ファイルが大きいため取得できませんでした（分割取得が利用できません）。時間をおいて再試行してください。');
@@ -862,8 +900,17 @@ function driveGetSession_(token) {
   return JSON.parse(raw);
 }
 
-function drivePutSession_(token, sess) {
-  CacheService.getUserCache().put(driveSessionKey_(token), JSON.stringify(sess), DRIVE_SESSION_TTL_SEC_);
+function drivePutSession_(token, sess, ttlSec) {
+  CacheService.getUserCache().put(driveSessionKey_(token), JSON.stringify(sess), ttlSec || DRIVE_SESSION_TTL_SEC_);
+}
+
+/**
+ * 完了したセッションを、Drive のセッション URL を含まない「完了済み」の印に置き換える。
+ * 最後のチャンクを Drive が受け取ったのに応答だけが失われると、クライアントは同じチャンクを再送する。
+ * そのとき「セッションが見つかりません」にせず、同じ結果（file）を返せるようにするため（印は短時間で消える）。
+ */
+function driveFinishSession_(token, sess, file) {
+  drivePutSession_(token, { done: true, total: sess.total, file: file }, DRIVE_DONE_TTL_SEC_);
 }
 
 /** Range ヘッダ（'bytes=0-N'）から次の送信オフセットを得る。ヘッダ無しは 0。 */
@@ -945,7 +992,9 @@ function beginUpload(meta) {
 /**
  * 1 チャンクを送る。最終チャンク以外は 256 KiB の倍数。
  * 再送に安全: サーバーが受信済みの範囲と食い違う offset が来たら（応答だけ失われた場合など）、Drive に状態を問い合わせて
- * { done:false, next } を返す。クライアントは返った next から続ける。完了時はセッションを削除し、file: { id, name } を返す。
+ * { done:false, next } を返す。クライアントは返った next から続ける。UrlFetchApp が例外を投げたとき（Drive が受け取ったか不明）も、
+ * 次の呼び出しは先に状態を問い合わせる。完了時は file: { id, name } を返し、セッションは「完了済み」の印（URL なし・短時間）に置き換える
+ * （最後のチャンクの応答が失われて再送されても、同じ結果を返すため）。
  */
 function uploadChunk(token, offset, base64, total) {
   var g = driveGuard_();
@@ -954,6 +1003,8 @@ function uploadChunk(token, offset, base64, total) {
     var sess = driveGetSession_(token);
     var tot = driveInt_(total, 'total', 1, DRIVE_MAX_TOTAL_BYTES_);
     if (tot !== sess.total) throw driveFail_('total がセッションと一致しません。');
+    // 完了済み（最後のチャンクの応答だけが失われて、クライアントが再送してきた）: 同じ結果を返す。データは送り直さない
+    if (sess.done === true) return { success: true, done: true, next: tot, file: sess.file };
     var off = driveInt_(offset, 'offset', 0, tot - 1);
     var bytes = Utilities.base64Decode(String(base64 || '').replace(/\s/g, ''));
     var n = bytes.length;
@@ -964,7 +1015,7 @@ function uploadChunk(token, offset, base64, total) {
     if (sess.next !== off) {
       var st = driveQueryStatus_(sess);
       if (st.done) {
-        CacheService.getUserCache().remove(driveSessionKey_(token));
+        driveFinishSession_(token, sess, st.file);
         return { success: true, done: true, next: tot, file: st.file };
       }
       sess.next = st.next;
@@ -972,18 +1023,29 @@ function uploadChunk(token, offset, base64, total) {
       if (off !== sess.next) return { success: true, done: false, next: sess.next };   // クライアントが next から再開
     }
 
-    var r = UrlFetchApp.fetch(sess.url, {
-      method: 'put',
-      contentType: 'application/octet-stream',
-      headers: { 'Content-Range': 'bytes ' + off + '-' + (off + n - 1) + '/' + tot },
-      payload: bytes,
-      followRedirects: false,   // 308 を「リダイレクト」として追従させない
-      muteHttpExceptions: true
-    });
+    var r;
+    try {
+      r = UrlFetchApp.fetch(sess.url, {
+        method: 'put',
+        contentType: 'application/octet-stream',
+        headers: { 'Content-Range': 'bytes ' + off + '-' + (off + n - 1) + '/' + tot },
+        payload: bytes,
+        followRedirects: false,   // 308 を「リダイレクト」として追従させない
+        muteHttpExceptions: true
+      });
+    } catch (fe) {
+      // 通信の例外（タイムアウトなど）: Drive がこのチャンクを受け取ったかどうか分からない。
+      // 記録の next のまま再送すると、受信済みの範囲に重なる PUT になる（Drive が拒否する可能性がある）ので、
+      // 次回は先に Drive へ状態を問い合わせさせる。
+      sess.next = -1;
+      try { drivePutSession_(token, sess); } catch (pe) { /* 記録できなくても元の例外を返す */ }
+      throw fe;
+    }
     var code = r.getResponseCode();
     if (code === 200 || code === 201) {
-      CacheService.getUserCache().remove(driveSessionKey_(token));
-      return { success: true, done: true, next: tot, file: driveFileFromResponse_(r) };
+      var file = driveFileFromResponse_(r);
+      driveFinishSession_(token, sess, file);
+      return { success: true, done: true, next: tot, file: file };
     }
     if (code === 308) {
       sess.next = driveNextFromRange_(r);
@@ -1010,7 +1072,8 @@ function abortUpload(token) {
     var raw = CacheService.getUserCache().get(key);
     if (raw) {
       try {
-        UrlFetchApp.fetch(JSON.parse(raw).url, { method: 'delete', followRedirects: false, muteHttpExceptions: true });
+        var url = JSON.parse(raw).url;   // 完了済みの印には URL が無い（Drive へは何も送らない）
+        if (url) UrlFetchApp.fetch(url, { method: 'delete', followRedirects: false, muteHttpExceptions: true });
       } catch (e1) { /* ignore */ }
       CacheService.getUserCache().remove(key);
     }

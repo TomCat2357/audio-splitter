@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@mediabunny/aac-encoder": "^1.61.4",
+    "@mediabunny/flac-encoder": "^1.61.4",
     "@mediabunny/mp3-encoder": "^1.61.4",
     "fflate": "^0.8.3",
     "mediabunny": "^1.61.4",

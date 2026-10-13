@@ -37,7 +37,17 @@ export function isGasError(v: unknown): v is GasError {
   return typeof v === 'object' && v !== null && typeof (v as { error?: unknown }).error === 'string';
 }
 
-export type GasCall = <T>(fn: string, ...args: unknown[]) => Promise<T | GasError>;
+/**
+ * サーバー関数に渡す引数の正規化。本物の google.script.run が引数の undefined をどう扱うかは確認できていないため、
+ * 末尾の undefined は落とし（サーバー側では「省略」になる）、途中の undefined は null に置き換える。
+ */
+export function normalizeArgs(args: readonly unknown[]): unknown[] {
+  let end = args.length;
+  while (end > 0 && args[end - 1] === undefined) end--;
+  return args.slice(0, end).map((a) => (a === undefined ? null : a));
+}
+
+export type GasCall =<T>(fn: string, ...args: unknown[]) => Promise<T | GasError>;
 
 export interface GasDeps {
   getRun?: () => GasRunner | undefined;
@@ -110,7 +120,7 @@ export function createGas(deps: GasDeps = {}) {
 
   const call: GasCall = <T>(fn: string, ...args: unknown[]) =>
     new Promise<T | GasError>((resolve, reject) => {
-      const job: Job = { fn, args, resolve: resolve as (v: never) => void, reject };
+      const job: Job = { fn, args: normalizeArgs(args), resolve: resolve as (v: never) => void, reject };
       if (active < limit && queue.length === 0) start(job);
       else queue.push(job);
     });

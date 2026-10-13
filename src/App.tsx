@@ -12,9 +12,9 @@ import { usePlayer } from './hooks/usePlayer';
 import { useShortcuts } from './hooks/useShortcuts';
 import { abortError, downloadDriveFile, isAbort, uniqueName, uploadToDrive } from './lib/driveTransfer';
 import { DriveTransferError, type DriveFolder, type DriveItem, type ListFolderResult } from './lib/driveTypes';
-import { isAbortError, probeFile, runJob } from './lib/engine';
+import { getEncodeSupport, isAbortError, probeFile, runJob } from './lib/engine';
 import { gasCall, isGasError } from './lib/gas';
-import { estimateOutputBytesPerSec, formatTime } from './lib/plan';
+import { estimateOutputBytesPerSec, formatTime, isPcmFormat } from './lib/plan';
 import {
   DEFAULT_VALUES,
   buildPlan,
@@ -27,7 +27,7 @@ import {
 } from './lib/split';
 import { createStore } from './lib/store';
 import { addPoint, removePointAt, replacePoint } from './lib/timeline';
-import type { AudioInfo, JobProgress, OutputSpec } from './lib/types';
+import type { AudioInfo, EncodeFormat, JobProgress, OutputSpec } from './lib/types';
 import { zipParts } from './lib/zip';
 
 type Notice = { text: string; tone: 'info' | 'warn' };
@@ -35,7 +35,7 @@ type Notice = { text: string; tone: 'info' | 'warn' };
 /** Drive から開いたファイルの出どころ（保存先の最初の表示位置に使う） */
 type DriveSource = { fileId: string; parentId: string | null };
 
-const DEFAULT_OUTPUT: OutputState = { kind: 'copy', format: 'm4a', bitrateKbps: 64, mono: false };
+const DEFAULT_OUTPUT: OutputState = { kind: 'copy', format: 'm4a', bitrateKbps: 64, mono: false, sampleRate: 0 };
 
 function stemOf(name: string): string {
   const dot = name.lastIndexOf('.');
@@ -66,6 +66,17 @@ export default function App() {
   const [manualPoints, setManualPoints] = useState<number[]>([]);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [output, setOutput] = useState<OutputState>(DEFAULT_OUTPUT);
+  // 形式ごとに書き出せるか（起動時に 1 回調べる。調べている間は null）
+  const [encodeSupport, setEncodeSupport] = useState<Record<EncodeFormat, boolean> | null>(null);
+  useEffect(() => {
+    let alive = true;
+    getEncodeSupport()
+      .then((s) => alive && setEncodeSupport(s))
+      .catch(() => alive && setEncodeSupport({ m4a: true, mp3: true, wav: true, flac: true, ogg: false }));
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const [runState, setRunState] = useState<RunState>({ status: 'idle' });
   const progress = useMemo(() => createStore<JobProgress | null>(null), []);
@@ -177,7 +188,14 @@ export default function App() {
     () =>
       output.kind === 'copy'
         ? { kind: 'copy' }
-        : { kind: 'encode', format: output.format, bitrate: output.bitrateKbps * 1000, mono: output.mono },
+        : {
+            kind: 'encode',
+            format: output.format,
+            bitrate: output.bitrateKbps * 1000,
+            mono: output.mono,
+            // サンプルレートは WAV / FLAC のときだけ有効（他の形式では裏に残った値を使わない）
+            sampleRate: isPcmFormat(output.format) && output.sampleRate > 0 ? output.sampleRate : undefined,
+          },
     [output],
   );
   const bytesPerSec = info ? estimateOutputBytesPerSec(info, outputSpec) : 0;
@@ -346,11 +364,14 @@ export default function App() {
     const totalBytes = items.reduce((s, r) => s + r.part.blob.size, 0) || 1;
     const folder = { id: dest.id, name: dest.name };
     let saved = 0;
+    // 保存先の一覧が打ち切られた（truncated）= 同名の確認が不完全。保存は続け、結果の表示に注意を添える
+    let namesIncomplete = false;
     setSaveState({ status: 'saving', index: 0, total, percent: 0, folderName: folder.name });
     try {
       // 同名を避けるため、保存先にあるファイル名を先に調べる
       const listed = await gasCall<ListFolderResult>('listFolder', dest.id);
       if (isGasError(listed)) throw new DriveTransferError(listed.error, listed.code);
+      namesIncomplete = !!listed.truncated;
       if (ac.signal.aborted) throw abortError();
       const names = new Set(listed.items.map((i) => i.name));
       let doneBytes = 0;
@@ -372,9 +393,9 @@ export default function App() {
         doneBytes += part.blob.size;
         saved++;
       }
-      setSaveState({ status: 'done', count: saved, folder });
+      setSaveState({ status: 'done', count: saved, folder, namesIncomplete });
     } catch (e) {
-      if (isAbort(e)) setSaveState({ status: 'stopped', reason: 'aborted', saved, total, folder });
+      if (isAbort(e)) setSaveState({ status: 'stopped', reason: 'aborted', saved, total, folder, namesIncomplete });
       else
         setSaveState({
           status: 'stopped',
@@ -383,6 +404,7 @@ export default function App() {
           saved,
           total,
           folder,
+          namesIncomplete,
         });
     } finally {
       saveAbort.current = null;
@@ -479,9 +501,11 @@ export default function App() {
                 if (!player.playing) player.toggle();
               }}
             />
-            <OutputSettings info={info} value={output} onChange={setOutput} locked={busy} totalBytes={totalBytes} />
+            <OutputSettings info={info} value={output} onChange={setOutput} locked={busy} totalBytes={totalBytes}
+              support={encodeSupport}
+            />
             <RunPanel
-              label={runLabel(mode, partCount, output.kind === 'encode')}
+              label={runLabel(mode, partCount, output.kind === 'encode', output.kind === 'encode' && isPcmFormat(output.format))}
               disabled={runDisabled}
               disabledReason={disabledReason}
               state={runState}

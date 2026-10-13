@@ -1,5 +1,6 @@
 // 「場所」とパンくずの純粋ロジック（DOM 非依存）。
 
+import { resolveMimeType } from './driveTransfer';
 import type { DriveFolder, DriveItem } from './driveTypes';
 
 export interface Place {
@@ -101,9 +102,25 @@ export function classifyInput(raw: string): LocationInput {
   if (s === 'root') return { kind: 'place', id: 'root' };
   const byLabel = PLACES.find((p) => p.label === s);
   if (byLabel) return { kind: 'place', id: byLabel.id };
-  // Drive の ID は英数字・ハイフン・アンダースコアの 20 文字前後。短い単語は検索として扱う
-  if (/^[-\w]{20,}$/.test(s)) return { kind: 'drive', text: s };
+  if (looksLikeBareId(s)) return { kind: 'drive', text: s };
   return { kind: 'none' };
+}
+
+/**
+ * URL を伴わない「ID だけ」の貼り付けを、ID らしいと見なす条件。
+ *  - 英数字・ハイフン・アンダースコアだけで 19 文字以上（200 文字まで。サーバーの上限と同じ）。
+ *    実際の ID は、共有ドライブが 19 文字前後、ファイル・フォルダが 33 文字前後〜44 文字前後。
+ *    サーバーは 10 文字以上を ID として受け付けるが、画面側を 10 文字まで緩めると
+ *    `meeting_2024` のような普通の検索語まで ID 扱いになり、入力中の自動検索が効かなくなる。
+ *  - 数字と英字の両方を含む。ID は乱数的な文字列で、この長さなら両方を含むのがほぼ確実。
+ *    一方、普通の検索語は、短い（`meeting_2024` は 12 文字）か、数字を含まない（`kaigi-rokuon`）ことが多い。
+ *    19 文字以上で数字も含む検索語（`meeting_recording_2024_01` など）は ID 扱いになるが、下記のとおり実害は小さい。
+ * 取りこぼし（ID なのに名前検索になる）は、サーバー側が ID を受け付ける範囲より狭いことで起きうるが、
+ * 逆の誤検出（検索語が ID 扱い）は Enter を押したときの resolveLocationInput が失敗して名前検索にフォールバックするので、
+ * 実害は「自動検索が Enter まで待たされる」だけに収まる。
+ */
+function looksLikeBareId(s: string): boolean {
+  return /^[-\w]{19,200}$/.test(s) && /[0-9]/.test(s) && /[A-Za-z]/.test(s);
 }
 
 /** 入力が URL / ID らしいか（入力が止まっただけでは検索せず、Enter を待つ判断に使う） */
@@ -118,12 +135,33 @@ export function folderUrl(id: string): string {
 
 export type ItemKind = 'folder' | 'audio' | 'video' | 'file';
 
-export function kindOf(item: Pick<DriveItem, 'type' | 'mimeType'>): ItemKind {
+/**
+ * 一覧の種類。Drive は m4a などを application/octet-stream（汎用）で保存することがあり、サーバーはそれも
+ * 拡張子を見て一覧に出す。ここも MIME が汎用・空のときは名前（拡張子）で判定する（resolveMimeType と同じ規則）。
+ */
+export function kindOf(item: Pick<DriveItem, 'type' | 'mimeType'> & { name?: string }): ItemKind {
   if (item.type === 'folder') return 'folder';
-  const mt = (item.mimeType || '').toLowerCase();
-  if (mt.startsWith('audio/')) return 'audio';
+  const mt = resolveMimeType(item.mimeType, item.name ?? '').toLowerCase();
+  if (mt.startsWith('audio/') || mt === 'application/ogg') return 'audio';
   if (mt.startsWith('video/')) return 'video';
   return 'file';
+}
+
+/** 一覧の「行」の識別子。同じ ID の行（音声ファイル本体とそれを指すショートカット）を区別する */
+export function rowKey(item: Pick<DriveItem, 'id' | 'name' | 'shortcut'>): string {
+  return `${item.id}|${item.shortcut ? 'shortcut' : 'file'}|${item.name}`;
+}
+
+/**
+ * 表示中のフォルダを強調する場所。場所そのもの（マイドライブ・共有アイテムなど）を開いているときはその場所。
+ * それ以外は、入ってきた場所（origin）があればそれ、なければフォルダの情報から推測する
+ * （共有アイテムの中のフォルダは親をたどれず、フォルダ自体の情報ではマイドライブと区別できないため、覚えておく）。
+ */
+export function placeFor(folder: Pick<DriveFolder, 'id' | 'driveId'> | null, origin: Place['key'] | null): Place {
+  const own = folder ? PLACES.find((p) => p.id === folder.id) : undefined;
+  if (own) return own;
+  const o = origin ? PLACES.find((p) => p.key === origin) : undefined;
+  return o ?? placeOf(folder);
 }
 
 /** 一覧が空のときの文言 */

@@ -9,8 +9,10 @@ import {
   getLastFolder,
   isVirtualId,
   kindOf,
-  placeOf,
+  placeFor,
+  rowKey,
   setLastFolder,
+  type Place,
 } from '../lib/drivePlaces';
 import type {
   DriveFolder,
@@ -158,6 +160,11 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<ErrorState | null>(null);
   const [selected, setSelected] = useState<DriveItem | null>(null);
+  // 選択状態は「同じ ID」ではなく「同じ行」で判定する（音声ファイル本体とショートカットは同じ ID で 2 行出ることがある）
+  const [selectedRow, setSelectedRow] = useState<string | null>(null);
+  // どの場所から入ったか（左の場所の強調に使う。共有アイテムの中のフォルダは、フォルダ自体の情報ではマイドライブと区別できない）
+  const [origin, setOrigin] = useState<Place['key'] | null>(null);
+  const originRef = useRef<Place['key'] | null>(null);
   const [searchText, setSearchText] = useState('');
   const [pathInfo, setPathInfo] = useState<{ forId: string; path: { id: string; name: string }[] } | null>(null);
   const [creating, setCreating] = useState(false);
@@ -182,10 +189,16 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
     }
   };
 
-  const listOptions = isSave ? { foldersOnly: true } : undefined;
+  // サーバー関数の引数に undefined を渡さない（読み込みモードは空のオブジェクト）
+  const listOptions = isSave ? { foldersOnly: true } : {};
+
+  const pick = (item: DriveItem | null) => {
+    setSelected(item);
+    setSelectedRow(item ? rowKey(item) : null);
+  };
 
   const loadFolder = useCallback(
-    async (id: string, opts?: { initial?: boolean; notice?: string }): Promise<void> => {
+    async (id: string, opts?: { initial?: boolean; notice?: string; keepOrigin?: boolean }): Promise<void> => {
       const mySeq = ++seq.current;
       clearTimer();
       setLoading(true);
@@ -193,7 +206,7 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
       setCreating(false);
       setSearchText('');
       try {
-        const res = await gasCall<ListFolderResult>('listFolder', id, isSave ? { foldersOnly: true } : undefined);
+        const res = await gasCall<ListFolderResult>('listFolder', id, listOptions);
         if (mySeq !== seq.current) return;
         if (isGasError(res)) {
           if (opts?.initial && id !== 'root') {
@@ -202,8 +215,11 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
             });
             return;
           }
-          setError({ message: res.error, retry: () => void loadFolder(id) });
+          setError({ message: res.error, retry: () => void loadFolder(id, { keepOrigin: opts?.keepOrigin }) });
         } else {
+          const place = placeFor(res.folder, opts?.keepOrigin ? originRef.current : null).key;
+          originRef.current = place;
+          setOrigin(place);
           setView({ folder: res.folder, items: res.items ?? [], query: null, truncated: !!res.truncated });
           lastFolderRef.current = res.folder.id;
           setLastFolder(res.folder.id);
@@ -211,11 +227,13 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
         }
       } catch (e) {
         if (mySeq !== seq.current) return;
-        setError({ message: errText(e), retry: () => void loadFolder(id) });
+        setError({ message: errText(e), retry: () => void loadFolder(id, { keepOrigin: opts?.keepOrigin }) });
       } finally {
         if (mySeq === seq.current) setLoading(false);
       }
     },
+    // listOptions は isSave から決まる
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [isSave],
   );
 
@@ -260,7 +278,7 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
       const term = raw.trim();
       clearTimer();
       if (!term) {
-        if (viewRef.current.query !== null) void loadFolder(lastFolderRef.current || 'root');
+        if (viewRef.current.query !== null) void loadFolder(lastFolderRef.current || 'root', { keepOrigin: true });
         return;
       }
       const cls = classifyInput(term);
@@ -296,7 +314,7 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
               setError({ message: `「${r.item.name}」は${RESTRICTED_TEXT}。開けません。`, retry: null });
               return;
             }
-            setSelected(r.item);
+            pick(r.item);
             if (r.parentId) {
               await loadFolder(r.parentId);
               return;
@@ -311,6 +329,8 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
         if (isGasError(res)) {
           setError({ message: res.error, retry: () => void runSearch(term, false) });
         } else {
+          originRef.current = null; // 検索結果から開いたフォルダは、フォルダの情報から場所を決める
+          setOrigin(null);
           setView({ folder: null, items: res.items ?? [], query: res.query || term, truncated: !!res.truncated });
         }
       } catch (e) {
@@ -333,7 +353,7 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
   const clearSearch = () => {
     setSearchText('');
     clearTimer();
-    if (viewRef.current.query !== null) void loadFolder(lastFolderRef.current || 'root');
+    if (viewRef.current.query !== null) void loadFolder(lastFolderRef.current || 'root', { keepOrigin: true });
   };
 
   // ---- 確定 ----
@@ -360,11 +380,11 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
 
   const onRowActivate = (item: DriveItem, how: 'click' | 'enter' | 'dblclick') => {
     if (item.type === 'folder') {
-      if (how !== 'dblclick') void loadFolder(item.id);
+      if (how !== 'dblclick') void loadFolder(item.id, { keepOrigin: true });
       return;
     }
     if (isSave || !item.canDownload) return;
-    setSelected(item);
+    pick(item);
     if (how === 'dblclick' || how === 'enter') confirm(item);
   };
 
@@ -381,7 +401,7 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
       } else {
         setNewName('');
         setCreating(false);
-        await loadFolder(res.id);
+        await loadFolder(res.id, { keepOrigin: true });
       }
     } catch (e) {
       if (mounted.current) setCreateError(`フォルダを作れませんでした。${errText(e)}`);
@@ -467,7 +487,7 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
   // ---- 表示 ----
   const crumbs = buildCrumbs(folder, pathInfo && pathInfo.forId === folder?.id ? pathInfo.path : null);
   const searching = view.query !== null;
-  const activePlace = folder ? placeOf(folder).key : null;
+  const activePlace = folder ? placeFor(folder, origin).key : null;
   const items = view.items;
 
   return createPortal(
@@ -554,7 +574,7 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
                           {c.name}
                         </span>
                       ) : (
-                        <button type="button" className="drive-crumb" onClick={() => void loadFolder(c.id)} data-testid="drive-crumb" title={c.name}>
+                        <button type="button" className="drive-crumb" onClick={() => void loadFolder(c.id, { keepOrigin: c.id !== 'root' })} data-testid="drive-crumb" title={c.name}>
                           {c.name}
                         </button>
                       )}
@@ -652,7 +672,7 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
                   const isFolder = item.type === 'folder';
                   const kind = kindOf(item);
                   const disabled = !isFolder && !item.canDownload;
-                  const isSel = !isFolder && selected?.id === item.id;
+                  const isSel = !isFolder && selectedRow === rowKey(item);
                   return (
                     <div
                       key={`${item.id}:${idx}`}
@@ -674,7 +694,7 @@ export function DriveModal({ mode, initialFolderId, onClose, onPickFile, onPickF
                           onRowActivate(item, 'enter');
                         } else if (e.key === ' ') {
                           e.preventDefault();
-                          if (!isFolder && !disabled && !isSave) setSelected(item);
+                          if (!isFolder && !disabled && !isSave) pick(item);
                           else if (isFolder) onRowActivate(item, 'click');
                         }
                       }}

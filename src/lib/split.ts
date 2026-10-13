@@ -107,9 +107,10 @@ export function segmentRows(
   return rows;
 }
 
-/** 実行ボタンの文言 */
-export function runLabel(mode: SplitMode, partCount: number, encode: boolean): string {
-  if (mode === 'maxSize') return encode ? 'サイズ上限で分割・圧縮して書き出す' : 'サイズ上限で分割して書き出す';
-  if (partCount <= 1) return encode ? '圧縮して書き出す' : 'そのまま書き出す';
-  return encode ? `${partCount} 個に分割・圧縮して書き出す` : `${partCount} 個に分割して書き出す`;
+/** 実行ボタンの文言。convert = WAV / FLAC への変換（「圧縮」ではないので言い方を変える） */
+export function runLabel(mode: SplitMode, partCount: number, encode: boolean, convert = false): string {
+  const verb = convert ? '変換' : '圧縮';
+  if (mode === 'maxSize') return encode ? `サイズ上限で分割・${verb}して書き出す` : 'サイズ上限で分割して書き出す';
+  if (partCount <= 1) return encode ? `${verb}して書き出す` : 'そのまま書き出す';
+  return encode ? `${partCount} 個に分割・${verb}して書き出す` : `${partCount} 個に分割して書き出す`;
 }

@@ -1,4 +1,4 @@
-import type { AudioInfo, OutputSpec } from './types';
+import type { AudioInfo, EncodeFormat, OutputSpec } from './types';
 
 /** これより短い区間は作らない（秒） */
 export const MIN_SEGMENT_SEC = 0.5;
@@ -155,8 +155,27 @@ export function buildPartName(
   return `${stem}_${String(index + 1).padStart(width, '0')}.${e}`;
 }
 
+/** FLAC の大きさの目安（WAV に対する割合）。内容によって変わるので初期値 */
+export const FLAC_RATIO = 0.6;
+
+/** ビットレートではなくサンプルレートとチャンネル数で大きさが決まる形式（WAV / FLAC） */
+export function isPcmFormat(format: EncodeFormat): boolean {
+  return format === 'wav' || format === 'flac';
+}
+
 /** 出力 1 秒あたりのバイト数の見積もり。 */
 export function estimateOutputBytesPerSec(info: AudioInfo, output: OutputSpec): number {
   if (output.kind === 'copy') return info.audioBitrate / 8;
+  if (isPcmFormat(output.format)) {
+    const rate = output.sampleRate ?? info.sampleRate;
+    const channels = output.mono ? 1 : info.numberOfChannels;
+    const wav = rate * channels * 2 * CONTAINER_OVERHEAD; // 16bit
+    return output.format === 'flac' ? wav * FLAC_RATIO : wav;
+  }
   return (output.bitrate / 8) * CONTAINER_OVERHEAD;
+}
+
+/** 分割なし（1 個だけ書き出す）ときのファイル名の接尾辞。WAV / FLAC は「圧縮」ではなく「変換」 */
+export function singleSuffixFor(output: OutputSpec): string {
+  return output.kind === 'encode' && isPcmFormat(output.format) ? 'converted' : 'compressed';
 }

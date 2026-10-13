@@ -70,6 +70,12 @@ describe('segmentRows / runLabel', () => {
     expect(runLabel('none', 1, true)).toBe('圧縮して書き出す');
     expect(runLabel('none', 1, false)).toBe('そのまま書き出す');
     expect(runLabel('manual', 3, true)).toContain('3 個');
+    // WAV / FLAC への変換は「圧縮」と言わない
+    expect(runLabel('none', 1, true, true)).toBe('変換して書き出す');
+    expect(runLabel('interval', 4, true, true)).toBe('4 個に分割・変換して書き出す');
+    expect(runLabel('maxSize', 4, true, true)).toBe('サイズ上限で分割・変換して書き出す');
+    expect(runLabel('maxSize', 4, true)).toBe('サイズ上限で分割・圧縮して書き出す');
+    expect(runLabel('none', 1, false, true)).toBe('そのまま書き出す');
   });
 });
 

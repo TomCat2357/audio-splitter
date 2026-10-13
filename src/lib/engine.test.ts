@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { ALL_FORMATS, BufferSource, Input } from 'mediabunny';
 import { strFromU8, unzipSync } from 'fflate';
 import { encodeFromWav, makeWav } from '../../scripts/make-fixtures.mjs';
-import { isAbortError, probeFile, runJob } from './engine';
+import { getEncodeSupport, isAbortError, probeFile, runJob } from './engine';
 import { zipParts } from './zip';
 import type { OutputPart } from './types';
 
@@ -185,6 +185,19 @@ describe('runJob: encode', () => {
     for (const p of parts) expect((await inspect(p)).codec).toBe('mp3');
   });
 
+  // 回帰テスト: モノラル化（リサンプラが入る）+ 半端な分割点でも MP3 が落ちない
+  it('WAV -> mono mp3 with split points that are not aligned to sample frames', async () => {
+    const info = await probeFile(shortWav);
+    const parts = await runJob(
+      shortWav,
+      info,
+      { kind: 'points', points: [1.3333333, 6.6666, 24.4755] },
+      { kind: 'encode', format: 'mp3', bitrate: 64000, mono: true },
+    );
+    expect(parts).toHaveLength(4);
+    for (const p of parts) expect((await inspect(p)).channels).toBe(1);
+  });
+
   it('mono: true produces 1 channel (m4a and mp3)', async () => {
     const info = await probeFile(shortWav);
     for (const format of ['m4a', 'mp3'] as const) {
@@ -216,7 +229,150 @@ describe('runJob: encode', () => {
     const info = await probeFile(shortWav);
     await expect(
       runJob(shortWav, { ...info, copyFormat: null }, { kind: 'points', points: [] }, { kind: 'copy' }),
-    ).rejects.toThrow(/圧縮モード/);
+    ).rejects.toThrow(/形式を変換・圧縮する/);
+  });
+});
+
+// WAV / FLAC / Opus への変換。入力は WAV（Node で読めるのは WAV だけ）。
+// Opus は Node では書き出せない（wasm 版が無く WebCodecs も無い）ので、失敗のしかたをテストする。
+// m4a / mp3 入力からの変換と、ブラウザでの Opus 書き出しはブラウザで手動確認する。
+async function sampleRateOf(part: OutputPart) {
+  const input = new Input({
+    source: new BufferSource(new Uint8Array(await part.blob.arrayBuffer())),
+    formats: ALL_FORMATS,
+  });
+  try {
+    return (await input.getPrimaryAudioTrack())!.sampleRate;
+  } finally {
+    input.dispose();
+  }
+}
+
+describe('runJob: convert to WAV / FLAC', () => {
+  const kinds = [
+    { format: 'wav', codec: 'pcm-s16', container: 'WAVE' },
+    { format: 'flac', codec: 'flac', container: 'FLAC' },
+  ] as const;
+
+  for (const { format, codec, container } of kinds) {
+    describe(format, () => {
+      const spec = (extra: object = {}) =>
+        ({ kind: 'encode', format, bitrate: 0, mono: false, ...extra }) as const;
+
+      it('splits into parts with the right format, codec and length', async () => {
+        const info = await probeFile(shortWav);
+        const parts = await runJob(shortWav, info, { kind: 'points', points: [10, 20] }, spec());
+        expect(parts).toHaveLength(3);
+        expect(parts[0].fileName).toBe(`会議録音_01.${format}`);
+        expect(parts[0].blob.type).toBe(format === 'wav' ? 'audio/wav' : 'audio/flac');
+        for (const p of parts) {
+          const m = await inspect(p);
+          expect(m.codec).toBe(codec);
+          expect(m.format).toBe(container);
+          expect(m.channels).toBe(2);
+          expect(p.durationSec).toBeGreaterThan(9.8);
+          expect(p.durationSec).toBeLessThan(10.3);
+          expect(await sampleRateOf(p)).toBe(44100);
+        }
+        if (format === 'wav') {
+          // 16bit ステレオ 44.1kHz の 10 秒 = 1.76MB
+          expect(parts[0].blob.size).toBeGreaterThan(1_700_000);
+          expect(parts[0].blob.size).toBeLessThan(1_800_000);
+        } else {
+          expect(parts[0].blob.size).toBeLessThan(1_700_000); // 可逆圧縮なので WAV より小さい
+        }
+      });
+
+      it('no split gives a "_converted" name', async () => {
+        const info = await probeFile(shortWav);
+        const parts = await runJob(shortWav, info, { kind: 'points', points: [] }, spec());
+        expect(parts).toHaveLength(1);
+        expect(parts[0].fileName).toBe(`会議録音_converted.${format}`);
+      });
+
+      it('mono and 16 kHz', async () => {
+        const info = await probeFile(shortWav);
+        const parts = await runJob(
+          shortWav,
+          info,
+          { kind: 'points', points: [10] },
+          spec({ mono: true, sampleRate: 16000 }),
+        );
+        expect(parts).toHaveLength(2);
+        for (const p of parts) {
+          const m = await inspect(p);
+          expect(m.codec).toBe(codec);
+          expect(m.channels).toBe(1);
+          expect(await sampleRateOf(p)).toBe(16000);
+        }
+        if (format === 'wav') {
+          // 16kHz モノラル 10 秒 = 320000 バイト + ヘッダ
+          expect(parts[0].blob.size).toBeGreaterThan(320_000);
+          expect(parts[0].blob.size).toBeLessThan(320_200);
+        }
+      });
+
+      // 回帰テスト: MP3 と同様、半端な開始位置で先頭の詰め物が 0 フレームになってもエンコーダが落ちない
+      it('does not fail at split points that are not aligned to sample frames', async () => {
+        const info = await probeFile(shortWav);
+        const parts = await runJob(
+          shortWav,
+          info,
+          { kind: 'points', points: [1.3333333, 6.6666, 24.4755] },
+          spec({ sampleRate: 16000 }),
+        );
+        expect(parts).toHaveLength(4);
+        const want = [1.3333333, 6.6666 - 1.3333333, 24.4755 - 6.6666, 30 - 24.4755];
+        for (const [i, p] of parts.entries()) {
+          expect((await inspect(p)).codec).toBe(codec);
+          expect(Math.abs(p.durationSec - want[i])).toBeLessThan(0.1);
+        }
+      });
+    });
+  }
+
+  it('maxSize: every part is <= maxBytes (WAV and FLAC)', async () => {
+    const info = await probeFile(wavFile); // 65s
+    for (const format of ['wav', 'flac'] as const) {
+      const maxBytes = 1_000_000;
+      const parts = await runJob(
+        wavFile,
+        info,
+        { kind: 'maxSize', maxBytes },
+        { kind: 'encode', format, bitrate: 0, mono: false, sampleRate: 22050 },
+      );
+      expect(parts.length).toBeGreaterThanOrEqual(2);
+      for (const p of parts) expect(p.blob.size).toBeLessThanOrEqual(maxBytes);
+      expect(parts[0].startSec).toBe(0);
+      expect(parts[parts.length - 1].endSec).toBeCloseTo(info.durationSec, 5);
+      expect(parts.map((p) => p.fileName)).toEqual(
+        parts.map((_, i) => `test_${String(i + 1).padStart(2, '0')}.${format}`),
+      );
+    }
+  });
+});
+
+describe('Opus (Ogg)', () => {
+  it('is not available in Node, and getEncodeSupport says so', async () => {
+    const support = await getEncodeSupport();
+    expect(support.ogg).toBe(false);
+    expect(support.wav).toBe(true);
+    expect(support.flac).toBe(true);
+    expect(support.m4a).toBe(true);
+    expect(support.mp3).toBe(true);
+  });
+
+  it('runJob fails with a user-facing Japanese message', async () => {
+    const info = await probeFile(shortWav);
+    const err = await runJob(
+      shortWav,
+      info,
+      { kind: 'points', points: [10] },
+      { kind: 'encode', format: 'ogg', bitrate: 48000, mono: false },
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/このブラウザでは Opus を書き出せません/);
+    expect(err.message).not.toMatch(/no_encodable|undefined|TypeError/);
   });
 });
 

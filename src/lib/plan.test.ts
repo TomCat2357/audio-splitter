@@ -8,6 +8,7 @@ import {
   formatTime,
   normalizePoints,
   parseTime,
+  singleSuffixFor,
   pointsForCount,
   pointsForInterval,
   segmentsFromPoints,
@@ -229,5 +230,43 @@ describe('estimateOutputBytesPerSec', () => {
     const v = estimateOutputBytesPerSec(info, { kind: 'encode', format: 'mp3', bitrate: 64000, mono: false });
     expect(v).toBeGreaterThan(8000);
     expect(v).toBeLessThan(8000 * 1.1);
+  });
+  it('WAV is sampleRate x channels x 2 bytes per second', () => {
+    const src = { audioBitrate: 128000, sampleRate: 44100, numberOfChannels: 2 } as AudioInfo;
+    const enc = (o: object) =>
+      estimateOutputBytesPerSec(src, { kind: 'encode', format: 'wav', bitrate: 0, mono: false, ...o });
+    const near = (v: number, base: number) => {
+      expect(v).toBeGreaterThanOrEqual(base);
+      expect(v).toBeLessThan(base * 1.05);
+    };
+    near(enc({}), 44100 * 2 * 2); // 指定なし = 入力の値
+    near(enc({ mono: true }), 44100 * 2);
+    near(enc({ sampleRate: 16000, mono: true }), 16000 * 2); // 16kHz モノラル = 32000 B/s
+    near(enc({ sampleRate: 16000 }), 16000 * 2 * 2);
+  });
+  it('FLAC is a rough share of WAV, and Opus follows the bitrate', () => {
+    const src = { audioBitrate: 128000, sampleRate: 44100, numberOfChannels: 2 } as AudioInfo;
+    const wav = estimateOutputBytesPerSec(src, { kind: 'encode', format: 'wav', bitrate: 0, mono: false });
+    const flac = estimateOutputBytesPerSec(src, { kind: 'encode', format: 'flac', bitrate: 0, mono: false });
+    expect(flac).toBeLessThan(wav);
+    expect(flac / wav).toBeCloseTo(0.6, 5);
+    const opus = estimateOutputBytesPerSec(src, { kind: 'encode', format: 'ogg', bitrate: 48000, mono: false, sampleRate: 16000 });
+    expect(opus).toBeGreaterThan(6000);
+    expect(opus).toBeLessThan(6000 * 1.1); // sampleRate は無視される
+  });
+});
+
+describe('singleSuffixFor', () => {
+  it('WAV / FLAC は converted、それ以外は compressed', () => {
+    const enc = (format: 'm4a' | 'mp3' | 'ogg' | 'wav' | 'flac') =>
+      singleSuffixFor({ kind: 'encode', format, bitrate: 64000, mono: false });
+    expect(enc('wav')).toBe('converted');
+    expect(enc('flac')).toBe('converted');
+    expect(enc('m4a')).toBe('compressed');
+    expect(enc('mp3')).toBe('compressed');
+    expect(enc('ogg')).toBe('compressed');
+    expect(singleSuffixFor({ kind: 'copy' })).toBe('compressed');
+    expect(buildPartName('会議.m4a', 0, 1, 'wav', 'converted')).toBe('会議_converted.wav');
+    expect(buildPartName('会議.m4a', 0, 3, 'wav', 'converted')).toBe('会議_01.wav');
   });
 });

@@ -180,8 +180,8 @@ clasp は `appsscript.json` の上書き確認に非対話で答えられず、�
 
 ファイルの中身は、`google.script.run` 経由の base64 チャンクで受け渡します。**OAuth トークンもアップロードのセッション URL も、ブラウザには渡しません**（戻り値に含めず、テストで検査しています）。
 
-- 読み込み: `getFileInfo` → `getFileChunk(fileId, offset, length)` を繰り返します。サーバーが `UrlFetchApp` で `files.get?alt=media` を Range 付きで読み、base64 にして返します（206 / 200 / 416 に対応。Range が効かないときはサーバー側で切り出し、`partial: false` を返します。さらに `DriveApp` に切り替える場合は 50 MB までです）。ETag を返し、画面側が取得中の更新を検出できます。
-- 保存: `beginUpload` → `uploadChunk` を繰り返し、`abortUpload` で取り消します。Drive の再開可能アップロード（resumable upload）をサーバーが `UrlFetchApp` でプロキシします。セッション URL は `CacheService.getUserCache()`（ユーザー単位、6 時間）に保存し、不透明なトークンだけを返します。応答だけが失われた再送には、Drive に状態を問い合わせて安全に続けます。
+- 読み込み: `getFileInfo` → `getFileChunk(fileId, offset, length)` を繰り返します。サーバーが `UrlFetchApp` で `files.get?alt=media` を Range 付きで読み、base64 にして返します（206 / 200 / 416 に対応。Range が効かないときはサーバー側で切り出し、`partial: false` を返します）。429 / 500 / 502 / 503 / 504、`UrlFetchApp` の例外、403 のうち利用回数の上限は一時的な失敗とみなし、`retryable: true` で返します（画面側が間隔を空けて再試行し、再試行が起きたら同時実行数を 1 に絞ります）。404 は再試行なしのエラーです。それ以外で Range 付きの取得が通らないとき（400 / 401 / 403 など）だけ、`DriveApp` でファイル全体を読んで切り出すフォールバックに入ります（50 MB まで）。ETag を返し、画面側が取得中の更新を検出できます。
+- 保存: `beginUpload` → `uploadChunk` を繰り返し、`abortUpload` で取り消します。Drive の再開可能アップロード（resumable upload）をサーバーが `UrlFetchApp` でプロキシします。セッション URL は `CacheService.getUserCache()`（ユーザー単位、6 時間）に保存し、不透明なトークンだけを返します。応答だけが失われた再送には、Drive に状態を問い合わせて安全に続けます（`UrlFetchApp` が例外を投げて Drive が受け取ったか不明のときも、次の呼び出しは先に状態を問い合わせます）。完了したセッションは、セッション URL を含まない「完了済み」の印に置き換えて 30 分だけ残し、最後のチャンクの応答が失われて再送されても同じ結果を返します。
 - 単位と上限: 1 チャンクは **8 MiB**（256 KiB の倍数。base64 で約 10.7 MB）。`getFileChunk` の `length` は 16 MiB まで。保存する 1 ファイルは **500 MB まで**です。
 - 転送速度、`google.script.run` の呼び出し 1 回あたりの所要時間、GAS の実行時間・クォータ（1 日の `UrlFetchApp` 呼び出し数や転送量など）に収まるかは、**実機では確認していません**。
 

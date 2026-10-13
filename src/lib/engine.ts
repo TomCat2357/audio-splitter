@@ -35,6 +35,7 @@ import {
   buildPartName,
   estimateOutputBytesPerSec,
   segmentsFromPoints,
+  singleSuffixFor,
 } from './plan';
 
 // ---------------------------------------------------------------------------
@@ -112,6 +113,9 @@ const ENCODE_TARGETS: Record<
 > = {
   m4a: { codec: 'aac', ext: 'm4a', mime: 'audio/mp4', make: () => new Mp4OutputFormat() },
   mp3: { codec: 'mp3', ext: 'mp3', mime: 'audio/mpeg', make: () => new Mp3OutputFormat() },
+  ogg: { codec: 'opus', ext: 'ogg', mime: 'audio/ogg', make: () => new OggOutputFormat() },
+  wav: { codec: 'pcm-s16', ext: 'wav', mime: 'audio/wav', make: () => new WavOutputFormat() },
+  flac: { codec: 'flac', ext: 'flac', mime: 'audio/flac', make: () => new FlacOutputFormat() },
 };
 
 // ---------------------------------------------------------------------------
@@ -224,21 +228,33 @@ const registered = new Set<AudioCodec>();
 
 const MP3_RATES = [48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000];
 const AAC_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+/** Opus が受け付けるサンプルレート（これ以外は 48kHz にする）。実際に使えるかは canEncodeAudio で確かめる */
+const OPUS_RATES = [48000, 24000, 16000, 12000, 8000];
+/** wasm FLAC エンコーダなどが扱えるチャンネル数の上限 */
+const MAX_PCM_CHANNELS = 8;
 
 interface EncodeParams {
   codec: AudioCodec;
   numberOfChannels: number;
   sampleRate: number;
-  bitrate: number;
+  /** 非可逆形式（M4A / MP3 / Opus）だけ */
+  bitrate: number | null;
+}
+
+/** WAV / FLAC のように、ビットレートではなくサンプルレートとチャンネル数で大きさが決まる形式 */
+const isPcmCodec = (codec: AudioCodec) => codec === 'pcm-s16' || codec === 'flac';
+
+function encodeCheckOptions(p: EncodeParams) {
+  return {
+    numberOfChannels: p.numberOfChannels,
+    sampleRate: p.sampleRate,
+    ...(p.bitrate !== null ? { bitrate: p.bitrate } : {}),
+  };
 }
 
 async function ensureEncoder(p: EncodeParams): Promise<void> {
-  if (registered.has(p.codec)) return;
-  const native = await canEncodeAudio(p.codec, {
-    numberOfChannels: p.numberOfChannels,
-    sampleRate: p.sampleRate,
-    bitrate: p.bitrate,
-  });
+  if (p.codec === 'pcm-s16' || registered.has(p.codec)) return; // WAV はエンコーダ不要
+  const native = await canEncodeAudio(p.codec, encodeCheckOptions(p));
   if (native) return;
   if (p.codec === 'aac') {
     const { registerAacEncoder } = await import('@mediabunny/aac-encoder');
@@ -246,19 +262,77 @@ async function ensureEncoder(p: EncodeParams): Promise<void> {
   } else if (p.codec === 'mp3') {
     const { registerMp3Encoder } = await import('@mediabunny/mp3-encoder');
     registerMp3Encoder();
+  } else if (p.codec === 'flac') {
+    const { registerFlacEncoder } = await import('@mediabunny/flac-encoder');
+    registerFlacEncoder();
+  } else {
+    // Opus には wasm 版が無い。ブラウザが対応していなければ書き出せない
+    throw new Error(OPUS_UNSUPPORTED);
   }
   registered.add(p.codec);
 }
 
-function resolveEncodeParams(
+const OPUS_UNSUPPORTED =
+  'このブラウザでは Opus を書き出せません。M4A（AAC）か MP3 を選ぶか、Chrome / Edge / Firefox で開いてください。';
+
+async function canEncodeOpus(channels: number, sampleRate: number, bitrate: number): Promise<boolean> {
+  try {
+    return await canEncodeAudio('opus', { numberOfChannels: channels, sampleRate, bitrate });
+  } catch {
+    return false;
+  }
+}
+
+let supportPromise: Promise<Record<EncodeFormat, boolean>> | null = null;
+
+/**
+ * 再エンコードで書き出せる形式。WAV は常に可、M4A / MP3 / FLAC はブラウザ標準で不可でも
+ * wasm 版に切り替えるので可。Opus は wasm 版が無く、ブラウザの対応次第。
+ * 画面は起動時に 1 回呼ぶ（結果は使い回す）。
+ */
+export function getEncodeSupport(): Promise<Record<EncodeFormat, boolean>> {
+  supportPromise ??= (async () => ({
+    m4a: true,
+    mp3: true,
+    wav: true,
+    flac: true,
+    ogg: (await canEncodeOpus(2, 48000, 64000)) || (await canEncodeOpus(1, 48000, 64000)),
+  }))();
+  return supportPromise;
+}
+
+async function resolveEncodeParams(
   info: AudioInfo,
   output: Extract<OutputSpec, { kind: 'encode' }>,
-): EncodeParams {
+): Promise<EncodeParams> {
   const target = ENCODE_TARGETS[output.format];
+  const codec = target.codec;
+
+  if (isPcmCodec(codec)) {
+    // サンプルレートは指定どおり（無ければ元のまま）。チャンネル数は元のまま（扱えない数なら 2ch）
+    const numberOfChannels = output.mono
+      ? 1
+      : info.numberOfChannels <= MAX_PCM_CHANNELS
+        ? info.numberOfChannels
+        : 2;
+    return { codec, numberOfChannels, sampleRate: output.sampleRate ?? info.sampleRate, bitrate: null };
+  }
+
   const numberOfChannels = output.mono ? 1 : Math.min(info.numberOfChannels, 2);
-  const rates = target.codec === 'mp3' ? MP3_RATES : AAC_RATES;
+  const bitrate = output.bitrate;
+  if (codec === 'opus') {
+    // 実際に受け付ける値をブラウザに確かめる。元のレートが使えなければ 48kHz
+    const candidates = [info.sampleRate, 48000].filter((r, i, a) => OPUS_RATES.includes(r) && a.indexOf(r) === i);
+    for (const sampleRate of candidates) {
+      if (await canEncodeOpus(numberOfChannels, sampleRate, bitrate)) {
+        return { codec, numberOfChannels, sampleRate, bitrate };
+      }
+    }
+    throw new Error(OPUS_UNSUPPORTED);
+  }
+  const rates = codec === 'mp3' ? MP3_RATES : AAC_RATES;
   const sampleRate = rates.includes(info.sampleRate) ? info.sampleRate : 44100;
-  return { codec: target.codec, numberOfChannels, sampleRate, bitrate: output.bitrate };
+  return { codec, numberOfChannels, sampleRate, bitrate };
 }
 
 // ---------------------------------------------------------------------------
@@ -270,7 +344,32 @@ interface PartResult {
   durationSec: number;
 }
 
+/**
+ * 1 パートの変換。
+ *
+ * サンプルレートやチャンネル数を変える変換では、先頭の詰め物（0 フレーム）がリサンプラに渡る時点で
+ * "frameOffset out of range" で落ちることがある（`process` での除外はリサンプラより後ろなので間に合わない）。
+ * 切り出し開始位置がサンプル境界からわずかにずれたときに起きるので、その場合に限り開始位置を
+ * 半フレームだけ後ろにずらしてやり直す（ずらすと詰め物は不要になる。長さにして 0.01 ミリ秒ほど）。
+ */
 async function convertSegment(
+  input: Input,
+  info: AudioInfo,
+  output: OutputSpec,
+  seg: { start: number; end: number },
+  onProgress: (fraction: number) => void,
+  signal?: AbortSignal,
+): Promise<PartResult> {
+  try {
+    return await convertSegmentOnce(input, info, output, seg, onProgress, signal);
+  } catch (e) {
+    if (isAbortError(e) || !describeError(e).includes('frameOffset out of range')) throw e;
+    const shifted = { start: seg.start + 0.5 / info.sampleRate, end: seg.end };
+    return await convertSegmentOnce(input, info, output, shifted, onProgress, signal);
+  }
+}
+
+async function convertSegmentOnce(
   input: Input,
   info: AudioInfo,
   output: OutputSpec,
@@ -285,7 +384,7 @@ async function convertSegment(
   if (output.kind === 'copy') {
     format = COPY_TARGETS[copyKeyFromExt(info.copyFormat!.ext)].make();
   } else {
-    encodeParams = resolveEncodeParams(info, output);
+    encodeParams = await resolveEncodeParams(info, output);
     format = ENCODE_TARGETS[output.format].make();
     await ensureEncoder(encodeParams);
   }
@@ -301,7 +400,9 @@ async function convertSegment(
       ? {
           audio: {
             codec: encodeParams.codec,
-            quality: new Quality({ bitrate: encodeParams.bitrate }),
+            ...(encodeParams.bitrate !== null
+              ? { quality: new Quality({ bitrate: encodeParams.bitrate }) }
+              : {}),
             numberOfChannels: encodeParams.numberOfChannels,
             sampleRate: encodeParams.sampleRate,
             forceTranscode: true,
@@ -318,7 +419,7 @@ async function convertSegment(
     const reasons = conversion.discardedTracks.map((t) => t.reason).join(', ');
     throw new Error(
       `この区間を出力できませんでした（${reasons || '原因不明'}）。` +
-        '圧縮モード（再エンコード）を試すか、Chrome / Edge で開いてください。',
+        '「形式を変換・圧縮する」（再エンコード）を試すか、Chrome / Edge で開いてください。',
     );
   }
 
@@ -376,18 +477,22 @@ export async function runJob(
   if (output.kind === 'copy' && !info.copyFormat) {
     throw new Error(
       `この音声（${info.codec}）は、元の形式のままでは書き出せません。` +
-        '「圧縮モード」（再エンコード）を使ってください。',
+        '「形式を変換・圧縮する」（再エンコード）を使ってください。',
     );
   }
   if (output.kind === 'encode' && !info.canDecode) {
     throw new Error(
-      `この音声（${info.codec}）は、このブラウザでは読み取れないため圧縮できません。` +
-        'Chrome または Edge で開き直すか、圧縮せずに分割だけ行ってください。',
+      `この音声（${info.codec}）は、このブラウザでは読み取れないため変換・圧縮できません。` +
+        'Chrome または Edge で開き直すか、変換や圧縮をせずに分割だけ行ってください。',
     );
+  }
+  if (output.kind === 'encode' && output.format === 'ogg' && !(await getEncodeSupport()).ogg) {
+    throw new Error(OPUS_UNSUPPORTED);
   }
   if (cb.signal?.aborted) throw abortError();
 
-  const ext = output.kind === 'copy' ? info.copyFormat!.ext : ENCODE_TARGETS[output.format].ext;
+  const singleSuffix = singleSuffixFor(output);
+  const ext =output.kind === 'copy' ? info.copyFormat!.ext : ENCODE_TARGETS[output.format].ext;
   const mime = output.kind === 'copy' ? info.copyFormat!.mime : ENCODE_TARGETS[output.format].mime;
   const total = info.durationSec;
   const parts: OutputPart[] = [];
@@ -403,7 +508,7 @@ export async function runJob(
   const finish = (index: number, nameTotal: number, seg: Seg, r: PartResult): OutputPart => {
     const part: OutputPart = {
       index,
-      fileName: buildPartName(info.fileName, index, nameTotal, ext),
+      fileName: buildPartName(info.fileName, index, nameTotal, ext, singleSuffix),
       blob: new Blob([r.bytes as BlobPart], { type: mime }),
       startSec: seg.start,
       endSec: seg.end,
@@ -447,7 +552,7 @@ export async function runJob(
   // maxSize は総数が事後にしか分からないので、ファイル名を総数ベースで確定し直す
   // （onPart で渡した OutputPart と同じオブジェクトを更新する）。
   if (plan.kind === 'maxSize') {
-    for (const p of parts) p.fileName = buildPartName(info.fileName, p.index, parts.length, ext);
+    for (const p of parts) p.fileName = buildPartName(info.fileName, p.index, parts.length, ext, singleSuffix);
   }
   return parts;
 }

@@ -15,11 +15,20 @@ export interface AudioInfo {
   canDecode: boolean;
 }
 
-export type EncodeFormat = 'm4a' | 'mp3';
+/** 再エンコードして書き出す形式。'ogg' は Opus を Ogg に格納したもの。 */
+export type EncodeFormat = 'm4a' | 'mp3' | 'ogg' | 'wav' | 'flac';
 
 export type OutputSpec =
   | { kind: 'copy' } // 無劣化
-  | { kind: 'encode'; format: EncodeFormat; bitrate: number; mono: boolean }; // bitrate は bps
+  | {
+      kind: 'encode';
+      format: EncodeFormat;
+      /** bps。wav / flac では使わない（値は何でもよい） */
+      bitrate: number;
+      mono: boolean;
+      /** Hz。wav / flac でだけ有効。未指定 = 元のまま */
+      sampleRate?: number;
+    };
 
 export type SplitPlan =
   | { kind: 'points'; points: number[] } // 分割点（秒）。空配列なら分割なしで 1 ファイル

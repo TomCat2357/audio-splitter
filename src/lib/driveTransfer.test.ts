@@ -160,6 +160,11 @@ describe('resolveMimeType', () => {
     expect(resolveMimeType(undefined, 'a.wav')).toBe('audio/wav');
     expect(resolveMimeType(null, 'a.mov')).toBe('video/quicktime');
     expect(resolveMimeType('application/octet-stream', 'a.unknown')).toBe('');
+    // サーバーの対応表にある拡張子（wma・aiff など）も補える
+    expect(resolveMimeType('application/octet-stream', 'a.wma')).toBe('audio/x-ms-wma');
+    expect(resolveMimeType('application/octet-stream', 'a.AIFF')).toBe('audio/aiff');
+    expect(resolveMimeType('application/octet-stream', 'a.3gp')).toBe('video/3gpp');
+    expect(resolveMimeType('application/octet-stream', 'toString')).toBe('');
   });
   it('具体的な MIME はそのまま', () => {
     expect(resolveMimeType('audio/x-m4a', 'a.m4a')).toBe('audio/x-m4a');

@@ -11,7 +11,7 @@ export interface ResultItem {
 export type SaveState =
   | { status: 'idle' }
   | { status: 'saving'; index: number; total: number; percent: number; folderName: string }
-  | { status: 'done'; count: number; folder: { id: string; name: string } }
+  | { status: 'done'; count: number; folder: { id: string; name: string }; namesIncomplete?: boolean }
   | {
       status: 'stopped';
       reason: 'aborted' | 'error';
@@ -19,6 +19,8 @@ export type SaveState =
       saved: number;
       total: number;
       folder: { id: string; name: string };
+      /** 保存先の一覧が打ち切られ、同名のファイルがあるかを確認しきれなかった */
+      namesIncomplete?: boolean;
     };
 
 export interface DriveSaveProps {
@@ -44,6 +46,15 @@ function FolderLink({ folder }: { folder: { id: string; name: string } }) {
     <a href={folderUrl(folder.id)} target="_blank" rel="noopener noreferrer" data-testid="drive-save-link">
       ドライブで「{folder.name}」を開く
     </a>
+  );
+}
+
+/** 保存先の項目が多く、同名の確認が不完全だったときの注意（保存は続けている。最悪でも同名のファイルが 2 つできるだけ） */
+function NamesIncompleteNote() {
+  return (
+    <p className="msg msg-warn" data-testid="drive-save-truncated-note">
+      保存先の項目が多いため、同じ名前のファイルがあるかを確認しきれませんでした。同じ名前のファイルが 2 つできている場合は、Google ドライブで確認してください。
+    </p>
   );
 }
 
@@ -78,9 +89,12 @@ function DriveSaveStatus({ drive }: { drive: DriveSaveProps }) {
   }
   if (s.status === 'done') {
     return (
-      <p className="msg msg-ok" role="status" data-testid="drive-save-done">
-        Google ドライブの「{s.folder.name}」に {s.count} 個を保存しました。 <FolderLink folder={s.folder} />
-      </p>
+      <>
+        <p className="msg msg-ok" role="status" data-testid="drive-save-done">
+          Google ドライブの「{s.folder.name}」に {s.count} 個を保存しました。 <FolderLink folder={s.folder} />
+        </p>
+        {s.namesIncomplete && <NamesIncompleteNote />}
+      </>
     );
   }
   if (s.status === 'stopped') {
@@ -89,19 +103,22 @@ function DriveSaveStatus({ drive }: { drive: DriveSaveProps }) {
         ? `保存を中止しました。${s.total} 個のうち ${s.saved} 個を保存しました。`
         : `保存に失敗しました。${s.total} 個のうち ${s.saved} 個を保存したところで止まりました。${s.message ?? ''}`;
     return (
-      <p
-        className={`msg ${s.reason === 'aborted' ? 'msg-warn' : 'msg-error'}`}
-        role="alert"
-        data-testid="drive-save-stopped"
-      >
-        {head}
-        {s.saved > 0 && (
-          <>
-            {' '}
-            保存できた分は「{s.folder.name}」にあります。 <FolderLink folder={s.folder} />
-          </>
-        )}
-      </p>
+      <>
+        <p
+          className={`msg ${s.reason === 'aborted' ? 'msg-warn' : 'msg-error'}`}
+          role="alert"
+          data-testid="drive-save-stopped"
+        >
+          {head}
+          {s.saved > 0 && (
+            <>
+              {' '}
+              保存できた分は「{s.folder.name}」にあります。 <FolderLink folder={s.folder} />
+            </>
+          )}
+        </p>
+        {s.namesIncomplete && <NamesIncompleteNote />}
+      </>
     );
   }
   return null;

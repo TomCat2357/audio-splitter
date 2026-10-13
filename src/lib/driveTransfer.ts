@@ -93,24 +93,24 @@ export function uniqueName(existingNames: Iterable<string>, desired: string): st
   }
 }
 
-const EXT_MIME: Record<string, string> = {
-  m4a: 'audio/mp4',
-  mp3: 'audio/mpeg',
-  wav: 'audio/wav',
-  ogg: 'audio/ogg',
-  oga: 'audio/ogg',
-  opus: 'audio/ogg',
-  flac: 'audio/flac',
-  aac: 'audio/aac',
-  mp4: 'video/mp4',
-  mov: 'video/quicktime',
-  webm: 'video/webm',
-  mkv: 'video/x-matroska',
+/**
+ * 拡張子 → MIME。汎用の種類（application/octet-stream）で保存されたファイルに、再生用の MIME を補い、
+ * 一覧で音声・動画かどうかを判定するのに使う。
+ * サーバー（gas/Code.gs の DRIVE_EXT_MIME_）と拡張子も MIME も同じにしておくこと
+ * （scripts/drive-contract-lists.test.mjs が一致を検査する。片方だけ更新すると落ちる）。
+ */
+export const EXT_MIME: Readonly<Record<string, string>> = {
+  m4a: 'audio/mp4', mp3: 'audio/mpeg', wav: 'audio/wav', aac: 'audio/aac', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg',
+  flac: 'audio/flac', wma: 'audio/x-ms-wma', aiff: 'audio/aiff', aif: 'audio/aiff', amr: 'audio/amr', weba: 'audio/webm',
+  mka: 'audio/x-matroska', mp2: 'audio/mpeg', m4b: 'audio/mp4', ac3: 'audio/ac3',
+  mp4: 'video/mp4', m4v: 'video/x-m4v', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska',
+  '3gp': 'video/3gpp', '3g2': 'video/3gpp2', wmv: 'video/x-ms-wmv', avi: 'video/x-msvideo', mpg: 'video/mpeg', mpeg: 'video/mpeg', flv: 'video/x-flv',
 };
 
 export function mimeFromName(name: string): string | null {
   const m = /\.([A-Za-z0-9]+)$/.exec(name);
-  return m ? (EXT_MIME[m[1].toLowerCase()] ?? null) : null;
+  const ext = m ? m[1].toLowerCase() : '';
+  return ext && Object.prototype.hasOwnProperty.call(EXT_MIME, ext) ? EXT_MIME[ext] : null;
 }
 
 /** getFileInfo の mimeType が汎用・空のとき、拡張子から音声・動画の MIME を補う */
@@ -236,6 +236,7 @@ export function createDriveTransfer(deps: TransferDeps = {}) {
     if (isGasError(res) || !res || res.success !== true) {
       throw fail(isGasError(res) ? res : null, 'ファイルの情報を取得できませんでした。');
     }
+    // サイズ 0 のファイルはサーバーの getFileInfo が先にエラー（「ファイルのサイズを取得できません…」）で断るので、通常ここには来ない。念のための保険
     if (!(res.size > 0)) throw new DriveTransferError('このファイルは中身が空のため、開けません。');
     if (res.size > MAX_FILE_BYTES) {
       throw new DriveTransferError(

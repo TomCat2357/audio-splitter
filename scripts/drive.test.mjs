@@ -571,24 +571,61 @@ describe('getFileChunk', () => {
     expect(r).toEqual({ error: '所有者によりダウンロードが制限されているため、ファイルを取得できません。', code: 'DOWNLOAD_RESTRICTED' });
   });
 
-  it('通信系の失敗は retryable: true（fetch の例外 / 5xx のあと DriveApp も失敗）', () => {
-    const fail = { getFileById: () => { throw new Error('Service unavailable') } };
-    let n = 0;
-    const a = load({ files: { get: () => ({ capabilities: { canDownload: true } }) }, fetch: () => { n++; throw new Error('network'); }, driveApp: fail });
-    expect(a.call('getFileChunk', FILE, 0, 10)).toMatchObject({ retryable: true });
-    expect(a.call('getFileChunk', FILE, 0, 10).error).toBeTruthy();
-    const b = load({ files: { get: () => ({}) }, fetch: () => resp(503), driveApp: fail });
-    expect(b.call('getFileChunk', FILE, 0, 10).retryable).toBe(true);
+  it('一時的な失敗（429 / 500 / 502 / 503 / 504、fetch の例外）は、DriveApp にも Drive API にも行かず retryable: true で返す', () => {
+    const blobOk = { getFileById: () => ({ getBlob: () => ({ getBytes: () => bytes(50) }), getSize: () => 50 }) }; // 使えてしまう DriveApp でも、呼ばれないこと
+    const cases = [
+      ...[429, 500, 502, 503, 504].map((s) => ({ label: String(s), fetch: () => resp(s) })),
+      { label: 'fetch の例外', fetch: () => { throw new Error('Exception: Timeout'); } },
+      { label: '403 rateLimitExceeded', fetch: () => resp(403, { text: '{"error":{"errors":[{"reason":"userRateLimitExceeded"}]}}' }) },
+    ];
+    for (const c of cases) {
+      const t = load({ files: { get: () => ({ mimeType: 'audio/mp4' }) }, fetch: c.fetch, driveApp: blobOk });
+      const r = t.call('getFileChunk', FILE, 10, 5);
+      expect(r.retryable, c.label).toBe(true);
+      expect(r.success, c.label).toBeUndefined();
+      expect(r.error, c.label).toBeTruthy();
+      expect(t.calls.driveApp, c.label).toEqual([]);
+      expect(t.calls.fetch, c.label).toHaveLength(1); // 再試行は画面側がする
+      expect(JSON.stringify(r), c.label).not.toContain(SECRET_TOKEN);
+    }
   });
 
-  it('Range が使えないとき DriveApp にフォールバック（etag なし・partial: false）。大きすぎるファイルは諦める', () => {
+  it('ショートカットの ID で一時的な失敗が続く場合も retryable（ターゲットでの読み直しの応答が 5xx のとき）', () => {
+    const TARGET = 'TARGETFILEID0123456';
+    const t = load({
+      files: { get: () => ({ mimeType: 'application/vnd.google-apps.shortcut', shortcutDetails: { targetId: TARGET } }) },
+      driveApp: noDriveApp,
+      fetch: (url) => (url.includes(TARGET) ? resp(503) : resp(404)),
+    });
+    expect(t.call('getFileChunk', 'SHORTCUTID0123456789', 0, 3).retryable).toBe(true);
+    expect(t.calls.driveApp).toEqual([]);
+  });
+
+  it('404 は DriveApp に行かず、retryable なしのエラー', () => {
+    const t = load({ files: { get: () => ({ mimeType: 'audio/mp4' }) }, fetch: () => resp(404), driveApp: noDriveApp });
+    const r = t.call('getFileChunk', FILE, 0, 10);
+    expect(r.error).toMatch(/見つかりません/);
+    expect(r.retryable).toBeUndefined();
+    expect(t.calls.driveApp).toEqual([]);
+  });
+
+  it('Range 取得そのものが通らないとき（400 / 401 / 403・上限以外）は DriveApp にフォールバック（etag なし・partial: false）。大きすぎるファイルは諦める', () => {
     const blob = (arr) => ({ getBlob: () => ({ getBytes: () => arr }), getSize: () => arr.length });
-    const ok = load({ files: { get: () => ({}) }, fetch: () => resp(500), driveApp: { getFileById: () => blob(bytes(50)) } });
-    expect(ok.call('getFileChunk', FILE, 10, 5)).toEqual({ success: true, offset: 10, length: 5, data: b64(bytes(5, 10)), etag: null, partial: false });
-    const big = load({ files: { get: () => ({}) }, fetch: () => resp(500), driveApp: { getFileById: () => ({ getSize: () => 51 * 1024 * 1024, getBlob: () => { throw new Error('読まない'); } }) } });
+    for (const s of [400, 401, 403]) {
+      const ok = load({ files: { get: () => ({}) }, fetch: () => resp(s), driveApp: { getFileById: () => blob(bytes(50)) } });
+      expect(ok.call('getFileChunk', FILE, 10, 5), String(s)).toEqual({ success: true, offset: 10, length: 5, data: b64(bytes(5, 10)), etag: null, partial: false });
+      expect(ok.calls.driveApp).toHaveLength(1);
+    }
+    const big = load({ files: { get: () => ({}) }, fetch: () => resp(400), driveApp: { getFileById: () => ({ getSize: () => 51 * 1024 * 1024, getBlob: () => { throw new Error('読まない'); } }) } });
     const r = big.call('getFileChunk', FILE, 0, 10);
     expect(r.retryable).toBe(true);
     expect(r.error).toBeTruthy();
+  });
+
+  it('フォールバックの DriveApp も失敗したら、通信系として retryable: true（400 のあと DriveApp が例外）', () => {
+    const fail = { getFileById: () => { throw new Error('Service unavailable') } };
+    const t = load({ files: { get: () => ({}) }, fetch: () => resp(400), driveApp: fail });
+    expect(t.call('getFileChunk', FILE, 0, 10)).toMatchObject({ retryable: true });
   });
 
   it('ショートカットの ID を渡されたら、ターゲットで読み直す', () => {
@@ -719,8 +756,56 @@ describe('beginUpload / uploadChunk / abortUpload', () => {
     const last = TOTAL - 2 * KB256;
     expect(t.call('uploadChunk', token, 2 * KB256, chunkB64(last), TOTAL)).toEqual({ success: true, done: true, next: TOTAL, file: { id: 'NEWFILEID0123456789', name: '録音_1.m4a' } });
     expect(t.calls.fetch[3][1].headers['Content-Range']).toBe(`bytes ${2 * KB256}-${TOTAL - 1}/${TOTAL}`);
+    // 完了後は、Drive のセッション URL を含まない「完了済み」の印だけが残る（最後のチャンクの応答が失われた再送に、同じ結果を返すため）
+    expect([...t.store.values()].join()).not.toContain(SESSION_URL);
+    expect([...t.store.values()].map((v) => JSON.parse(v))).toEqual([{ done: true, total: TOTAL, file: { id: 'NEWFILEID0123456789', name: '録音_1.m4a' } }]);
+    expect(t.call('uploadChunk', token, 2 * KB256, chunkB64(last), TOTAL)).toEqual({ success: true, done: true, next: TOTAL, file: { id: 'NEWFILEID0123456789', name: '録音_1.m4a' } });
+    expect(t.calls.fetch).toHaveLength(4);   // 再送でも Drive へは何も送らない
+    // total が合わなければ、完了済みでも結果は返さない
+    expect(t.call('uploadChunk', token, 0, chunkB64(10), TOTAL + 1).error).toMatch(/total/);
+  });
+
+  it('最後のチャンクの応答だけが失われて再送されても、完了済みの印があれば同じ結果を返す。abortUpload は印を消すだけで Drive に DELETE を送らない', () => {
+    const t = mk([resp(200, { text: JSON.stringify({ id: 'NEWFILEID0123456789', name: 'a.m4a' }) })]);
+    const { token } = t.call('beginUpload', { folderId: FOLDER, name: 'a.m4a', size: 100 });
+    const first = t.call('uploadChunk', token, 0, chunkB64(100), 100);
+    expect(first.done).toBe(true);
+    expect(t.call('uploadChunk', token, 0, chunkB64(100), 100)).toEqual(first);
+    expect(t.call('abortUpload', token)).toEqual({ success: true });
+    expect(t.calls.fetch).toHaveLength(2);   // 開始 + 送信だけ
     expect(t.store.size).toBe(0);
-    expect(t.call('uploadChunk', token, 0, chunkB64(10), TOTAL).error).toMatch(/セッション/);
+    expect(t.call('uploadChunk', token, 0, chunkB64(100), 100).error).toMatch(/セッション/);
+  });
+
+  it('UrlFetchApp が例外を投げた（Drive が受け取ったか不明）あとの再送は、同じ位置への PUT を繰り返さず、先に Drive へ状態を問い合わせる', () => {
+    const t = mk([
+      () => { throw new Error('Exception: Timeout: https://www.googleapis.com/upload/drive/v3/files'); },
+      // 再送: 状態問い合わせ → Drive は 1 チャンク分を受信済みと答える（例外の前に保存されていた）
+      (url, opts) => { expect(opts.headers['Content-Range']).toBe(`bytes */${TOTAL}`); return resp(308, { headers: { Range: `bytes=0-${KB256 - 1}` } }); },
+      resp(308, { headers: { Range: `bytes=0-${2 * KB256 - 1}` } }),
+    ]);
+    const { token } = begin(t);
+    const failed = t.call('uploadChunk', token, 0, chunkB64(KB256), TOTAL);
+    expect(failed).toMatchObject({ retryable: true });
+    expect(failed.error).toContain('Timeout');
+    expect(JSON.parse([...t.store.values()][0]).next).toBe(-1);
+    // 同じ offset の再送: データは送り直さず、next だけ返す
+    expect(t.call('uploadChunk', token, 0, chunkB64(KB256), TOTAL)).toEqual({ success: true, done: false, next: KB256 });
+    expect(t.calls.fetch).toHaveLength(3);   // 開始 + 送信(例外) + 状態問い合わせ
+    expect(t.call('uploadChunk', token, KB256, chunkB64(KB256), TOTAL)).toEqual({ success: true, done: false, next: 2 * KB256 });
+  });
+
+  it('保存名が 150 文字を超えるときは、拡張子を残して切り詰める（拡張子が切れると MIME を決められず保存できなくなる）', () => {
+    const t = mk();
+    const r = begin(t, { folderId: FOLDER, name: 'あ'.repeat(200) + '.m4a', size: 10 });
+    expect(r.success).toBe(true);
+    const sent = JSON.parse(t.calls.fetch[0][1].payload);
+    expect(sent.name).toHaveLength(150);
+    expect(sent.name.endsWith('.m4a')).toBe(true);
+    expect(sent.mimeType).toBe('audio/mp4');
+    // 拡張子が無い・極端に長い拡張子は従来どおり（拡張子が許可リストに無ければ断る）
+    expect(begin(mk(), { folderId: FOLDER, name: 'あ'.repeat(200), size: 10 }).error).toBeTruthy();
+    expect(begin(mk(), { folderId: FOLDER, name: 'a'.repeat(200) + '.' + 'x'.repeat(30), size: 10 }).error).toBeTruthy();
   });
 
   it('256 KiB の倍数でない途中チャンク、範囲外、total 不一致、空は拒否（Drive へ送らない）', () => {
@@ -776,7 +861,7 @@ describe('beginUpload / uploadChunk / abortUpload', () => {
     // 先に進んでいる前提のオフセットを送る（サーバーの記録は 0）
     const r = t.call('uploadChunk', token, KB256, chunkB64(KB256), TOTAL);
     expect(r).toEqual({ success: true, done: true, next: TOTAL, file: { id: 'NEWFILEID0123456789', name: 'a.m4a' } });
-    expect(t.store.size).toBe(0);
+    expect([...t.store.values()].join()).not.toContain(SESSION_URL);   // URL は捨て、完了済みの印だけ残す
 
     const t2 = mk([resp(404)]);
     const tok = begin(t2).token;

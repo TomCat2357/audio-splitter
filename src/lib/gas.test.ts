@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createGas, isGasAvailable, isGasError, type GasRunner } from './gas';
+import { createGas, isGasAvailable, isGasError, normalizeArgs, type GasRunner } from './gas';
 
 /** google.script.run の偽物。ビルダー式（this はハンドラを結んだビルダー自身でなければ失敗）で、呼び出しを記録し、応答は手動で返す */
 function simpleRun() {
@@ -38,6 +38,20 @@ describe('gas: Promise 化', () => {
     expect(f.calls[0].args).toEqual(['root', { foldersOnly: true }]);
     f.calls[0].ok({ folder: 1 });
     await expect(p).resolves.toEqual({ folder: 1 });
+  });
+
+  it('引数の正規化: 末尾の undefined は落とし、途中の undefined は null にする（サーバー関数に undefined を渡さない）', async () => {
+    const f = simpleRun();
+    const gas = createGas({ getRun: () => f.run });
+    void gas.call('listFolder', 'root', undefined);
+    void gas.call('a', undefined, 'x', undefined, undefined);
+    void gas.call('b', undefined);
+    void gas.call('c');
+    void gas.call('d', 0, '', false, null, { o: 1 });
+    expect(f.calls.map((c) => c.args)).toEqual([['root'], [null, 'x'], [], [], [0, '', false, null, { o: 1 }]]);
+    expect(normalizeArgs([])).toEqual([]);
+    expect(normalizeArgs([undefined, undefined])).toEqual([]);
+    expect(normalizeArgs([1, undefined, 2])).toEqual([1, null, 2]);
   });
 
   it('{ error } の戻り値は reject せずそのまま返す', async () => {
