@@ -1,4 +1,5 @@
 import { formatBytes, isPcmFormat } from '../lib/plan';
+import { formatPitch } from '../lib/pitch';
 import { formatRate } from '../lib/rate';
 import type { AudioInfo, EncodeFormat } from '../lib/types';
 
@@ -9,13 +10,38 @@ export interface OutputState {
   mono: boolean;
   /** Hz。0 = 元のまま。WAV / FLAC のときだけ効く */
   sampleRate: number;
-  /** 現在の再生速度で書き出す（既定オフ）。再生速度が 1 倍のときは効かない */
-  atSpeed: boolean;
+  /** 現在の再生速度・音程で書き出す（既定オフ）。速度 1 倍・音程 0 のときは効かない */
+  atPlayback: boolean;
 }
 
-/** 再生速度を反映して書き出すか。反映するときは無劣化コピーが使えず、再エンコードになる */
-export function isSpeedExportActive(value: OutputState, rate: number, info: AudioInfo): boolean {
-  return value.atSpeed && rate !== 1 && info.canDecode;
+/** いまの再生の設定（速度・音程） */
+export interface PlaybackSettings {
+  rate: number;
+  /** 半音 */
+  pitch: number;
+  keepPitch: boolean;
+}
+
+/** 再生速度・音程を反映して書き出すか。反映するときは無劣化コピーが使えず、再エンコードになる */
+export function isPlaybackExportActive(value: OutputState, playback: PlaybackSettings, info: AudioInfo): boolean {
+  return value.atPlayback && (playback.rate !== 1 || playback.pitch !== 0) && info.canDecode;
+}
+
+/** 「×1.5・音程 +3 半音」のような、いまの再生の設定の短い表記 */
+function playbackSummary({ rate, pitch, keepPitch }: PlaybackSettings): string {
+  const parts = [`×${formatRate(rate)}`];
+  if (rate !== 1 && !keepPitch) parts.push('音程も速さに合わせて変える');
+  if (pitch !== 0) parts.push(`音程 ${formatPitch(pitch)} 半音`);
+  return parts.join('・');
+}
+
+/** 反映して書き出すときに、何がどう変わるかの説明 */
+function playbackEffect({ rate, pitch, keepPitch }: PlaybackSettings): string {
+  const length = rate !== 1 ? `長さが 1/${formatRate(rate)} になります` : '長さは変わりません';
+  let tone: string;
+  if (rate !== 1 && !keepPitch) tone = pitch !== 0 ? `音程は速さに合わせて変わり、さらに ${formatPitch(pitch)} 半音ずれます` : '音程も速さに合わせて変わります';
+  else tone = pitch !== 0 ? `音程が ${formatPitch(pitch)} 半音変わります` : '音程は変わりません';
+  return `${length}。${tone}。`;
 }
 
 export const BITRATES = [32, 48, 64, 96, 128, 192];
@@ -44,16 +70,16 @@ interface Props {
   totalBytes: number;
   /** 形式ごとに書き出せるか。null = 調べている最中 */
   support: Record<EncodeFormat, boolean> | null;
-  /** いまの再生速度（倍） */
-  rate: number;
+  /** いまの再生の設定（速度・音程） */
+  playback: PlaybackSettings;
 }
 
-export function OutputSettings({ info, value, onChange, locked, totalBytes, support, rate }: Props) {
+export function OutputSettings({ info, value, onChange, locked, totalBytes, support, playback }: Props) {
   const set = (patch: Partial<OutputState>) => onChange({ ...value, ...patch });
   const copyOk = info.copyFormat !== null;
   const encodeOk = info.canDecode;
-  const speedOn = isSpeedExportActive(value, rate, info);
-  // 速度を変えて書き出すときは、選択に関わらず再エンコードになる
+  const speedOn = isPlaybackExportActive(value, playback, info);
+  // 速度・音程を変えて書き出すときは、選択に関わらず再エンコードになる
   const encoding = value.kind === 'encode' || speedOn;
   const ratio = info.fileSize > 0 ? Math.round((totalBytes / info.fileSize) * 100) : 0;
   const pcm = isPcmFormat(value.format);
@@ -78,7 +104,7 @@ export function OutputSettings({ info, value, onChange, locked, totalBytes, supp
               <strong>元の音質のまま（無劣化・高速）</strong>
               <span className="sub">
                 {speedOn
-                  ? '再生速度を変えて書き出すときは使えません（再エンコードになります）。'
+                  ? '再生速度・音程を変えて書き出すときは使えません（再エンコードになります）。'
                   : copyOk
                     ? `出力形式: ${info.copyFormat!.label}`
                     : 'この音声は元の形式のままでは書き出せません。形式を変換する方を選んでください。'}
@@ -109,23 +135,21 @@ export function OutputSettings({ info, value, onChange, locked, totalBytes, supp
         <label className="check">
           <input
             type="checkbox"
-            checked={value.atSpeed}
+            checked={value.atPlayback}
             disabled={!encodeOk}
-            onChange={(e) => set({ atSpeed: e.target.checked })}
+            onChange={(e) => set({ atPlayback: e.target.checked })}
             data-testid="at-speed-checkbox"
           />
           <span>
-            現在の再生速度（×{formatRate(rate)}）で書き出す
+            現在の再生速度・音程（{playbackSummary(playback)}）で書き出す
             <span className="sub" data-testid="at-speed-note">
               {!encodeOk
                 ? 'このブラウザではこの音声を読み取れないため使えません。'
                 : speedOn
-                  ? '再エンコードで書き出します（元の音質のままのコピーは使えません）。音程は変わらず、長さが 1/' +
-                    formatRate(rate) +
-                    ' になります。'
-                  : value.atSpeed
-                    ? 'いまの再生速度は 1 倍なので、そのままの速さで書き出されます。速度を変えるとその速さになります。'
-                    : '音程を変えずに、速さだけ変えて書き出します。再エンコードになります。'}
+                  ? '再エンコードで書き出します（元の音質のままのコピーは使えません）。' + playbackEffect(playback)
+                  : value.atPlayback
+                    ? 'いまは 1 倍・元の音程なので、そのまま書き出されます。速度や音程を変えるとそのとおりになります。'
+                    : '再生と同じ速さ・音程で書き出します（逆再生は反映されません）。再エンコードになります。'}
             </span>
           </span>
         </label>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FileSection, type ProbeState } from './components/FileSection';
-import { OutputSettings, isSpeedExportActive, type OutputState } from './components/OutputSettings';
+import { OutputSettings, isPlaybackExportActive, type OutputState } from './components/OutputSettings';
 import { PlayerPanel } from './components/PlayerPanel';
 import { Results, type ResultItem } from './components/Results';
 import { RunPanel, type RunState } from './components/RunPanel';
@@ -10,6 +10,7 @@ import { usePlayer } from './hooks/usePlayer';
 import { useShortcuts } from './hooks/useShortcuts';
 import { getEncodeSupport, isAbortError, probeFile, runJob } from './lib/engine';
 import { estimateOutputBytesPerSec, formatTime, isPcmFormat } from './lib/plan';
+import { pitchRatioOf } from './lib/pitch';
 import {
   DEFAULT_VALUES,
   buildPlan,
@@ -27,7 +28,7 @@ import { zipParts } from './lib/zip';
 
 type Notice = { text: string; tone: 'info' | 'warn' };
 
-const DEFAULT_OUTPUT: OutputState = { kind: 'copy', format: 'm4a', bitrateKbps: 64, mono: false, sampleRate: 0, atSpeed: false };
+const DEFAULT_OUTPUT: OutputState = { kind: 'copy', format: 'm4a', bitrateKbps: 64, mono: false, sampleRate: 0, atPlayback: false };
 
 function stemOf(name: string): string {
   const dot = name.lastIndexOf('.');
@@ -165,8 +166,12 @@ export default function App() {
   }, []);
 
   // ---- 出力・分割の導出値 ----
-  // 再生速度を反映して書き出すときは再エンコードになる（無劣化コピーでは速度を変えられない）
-  const speedOn = info ? isSpeedExportActive(output, player.rate, info) : false;
+  // 再生速度・音程を反映して書き出すときは再エンコードになる（無劣化コピーでは変えられない）
+  const playback = useMemo(
+    () => ({ rate: player.rate, pitch: player.pitch, keepPitch: player.keepPitch }),
+    [player.rate, player.pitch, player.keepPitch],
+  );
+  const speedOn = info ? isPlaybackExportActive(output, playback, info) : false;
   const encoding = output.kind === 'encode' || speedOn;
   const outputSpec: OutputSpec = useMemo(
     () =>
@@ -179,9 +184,10 @@ export default function App() {
             mono: output.mono,
             // サンプルレートは WAV / FLAC のときだけ有効（他の形式では裏に残った値を使わない）
             sampleRate: isPcmFormat(output.format) && output.sampleRate > 0 ? output.sampleRate : undefined,
-            speed: speedOn ? player.rate : undefined,
+            speed: speedOn ? playback.rate : undefined,
+            pitchRatio: speedOn ? pitchRatioOf(playback.pitch, playback.rate, playback.keepPitch) : undefined,
           },
-    [output, encoding, speedOn, player.rate],
+    [output, encoding, speedOn, playback],
   );
   const bytesPerSec = info ? estimateOutputBytesPerSec(info, outputSpec) : 0;
   const settingsError = info ? validateSettings(mode, values, duration, bytesPerSec) : null;
@@ -391,7 +397,7 @@ export default function App() {
             />
             <OutputSettings info={info} value={output} onChange={setOutput} locked={busy} totalBytes={totalBytes}
               support={encodeSupport}
-              rate={player.rate}
+              playback={playback}
             />
             <RunPanel
               label={runLabel(mode, partCount, encoding, encoding && isPcmFormat(output.format))}

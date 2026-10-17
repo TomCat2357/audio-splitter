@@ -339,6 +339,19 @@ kbd {
   flex-wrap: wrap;
   gap: 6px;
 }
+.pitch-row .rate-value {
+  min-width: 5.5em;
+  font-variant-numeric: tabular-nums;
+}
+.check.keep-pitch {
+  flex-basis: 100%;
+  padding: 0;
+  border: none;
+  font-size: 0.9rem;
+}
+.check.keep-pitch input {
+  margin-top: 2px;
+}
 select,
 input[type='text'],
 input[type='number'] {

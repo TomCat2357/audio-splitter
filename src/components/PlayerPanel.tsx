@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useStoreValue } from '../hooks/useStoreValue';
 import type { Player } from '../hooks/usePlayer';
 import { formatTime } from '../lib/plan';
+import { MAX_PITCH, MIN_PITCH, PITCH_STEP, formatPitch } from '../lib/pitch';
 import { MAX_RATE, MIN_RATE, RATE_PRESETS, RATE_STEP, formatRate } from '../lib/rate';
 import { Timeline } from './Timeline';
 
@@ -121,8 +122,8 @@ export function PlayerPanel({
           className={`btn btn-sm btn-reverse${player.reverse ? ' is-on' : ''}`}
           aria-pressed={player.reverse}
           onClick={() => player.setReverse(!player.reverse)}
-          disabled={!player.canReverse}
-          title={player.canReverse ? '逆向きに再生します' : 'このファイルは逆再生できません'}
+          disabled={!player.canProcess}
+          title={player.canProcess ? '逆向きに再生します' : 'このファイルは逆再生できません'}
           data-testid="reverse-toggle"
         >
           <span aria-hidden="true">◀ </span>逆再生
@@ -162,10 +163,83 @@ export function PlayerPanel({
             </button>
           ))}
         </div>
+        <label className="check keep-pitch">
+          <input
+            type="checkbox"
+            checked={player.keepPitch}
+            onChange={(e) => player.setKeepPitch(e.target.checked)}
+            disabled={player.unplayable}
+            data-testid="keep-pitch"
+          />
+          <span>
+            音程を保つ
+            <span className="sub">
+              {player.keepPitch
+                ? '速さを変えても声の高さは変わりません'
+                : 'テープのように、速くすると高く、遅くすると低くなります'}
+            </span>
+          </span>
+        </label>
       </div>
-      {player.reverseError && (
-        <p className="msg msg-warn" role="status" data-testid="reverse-error">
-          {player.reverseError}
+
+      <div className="speed-row pitch-row">
+        <label className="rate">
+          <span>音程</span>
+          <input
+            type="range"
+            min={MIN_PITCH}
+            max={MAX_PITCH}
+            step={PITCH_STEP}
+            value={player.pitch}
+            onChange={(e) => player.setPitch(Number(e.target.value))}
+            disabled={!player.canProcess}
+            aria-valuetext={`${formatPitch(player.pitch)} 半音`}
+            data-testid="pitch-slider"
+          />
+        </label>
+        <span className="rate-value" data-testid="pitch-value">
+          {formatPitch(player.pitch)} 半音
+        </span>
+        <div className="rate-presets" role="group" aria-label="音程の調整">
+          <button
+            type="button"
+            className="btn btn-sm"
+            aria-label="半音下げる"
+            onClick={() => player.stepPitch(-1)}
+            disabled={!player.canProcess || player.pitch <= MIN_PITCH}
+            data-testid="pitch-down"
+          >
+            ♭
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            aria-label="半音上げる"
+            onClick={() => player.stepPitch(1)}
+            disabled={!player.canProcess || player.pitch >= MAX_PITCH}
+            data-testid="pitch-up"
+          >
+            ♯
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => player.setPitch(0)}
+            disabled={!player.canProcess || player.pitch === 0}
+            data-testid="pitch-reset"
+          >
+            元の音程
+          </button>
+        </div>
+        {!player.canProcess && !player.unplayable && (
+          <span className="sub" data-testid="pitch-unavailable">
+            このファイルは音程を変えられません
+          </span>
+        )}
+      </div>
+      {player.playError && (
+        <p className="msg msg-warn" role="status" data-testid="play-error">
+          {player.playError}
         </p>
       )}
 

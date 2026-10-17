@@ -39,7 +39,8 @@ import {
   segmentsFromPoints,
   singleSuffixFor,
 } from './plan';
-import { createStretcher, type Stretcher } from './stretch';
+import type { Stretcher } from './stretch';
+import { createTransform, isIdentity } from './transform';
 
 // ---------------------------------------------------------------------------
 // 出力形式の定義
@@ -382,8 +383,12 @@ async function convertSegmentOnce(
 ): Promise<PartResult> {
   if (signal?.aborted) throw abortError();
 
-  if (output.kind === 'encode' && output.speed && output.speed !== 1) {
-    return await convertSegmentAtSpeed(input, info, output, output.speed, seg, onProgress, signal);
+  if (output.kind === 'encode') {
+    const speed = output.speed ?? 1;
+    const pitchRatio = output.pitchRatio ?? 1;
+    if (!isIdentity(speed, pitchRatio)) {
+      return await convertSegmentTransformed(input, info, output, speed, pitchRatio, seg, onProgress, signal);
+    }
   }
 
   let format: OutputFormat;
@@ -471,17 +476,18 @@ async function measureDuration(bytes: Uint8Array, fallbackSec: number): Promise<
 }
 
 /**
- * 速度を変えた 1 パートの変換。Conversion の process フックは終端での flush ができないので、
- * デコード → 区間でトリム → タイムストレッチ → エンコード、を手動でつなぐ。
- * ストレッチは元のサンプルレート・チャンネル数のまま行い、モノラル化やサンプルレート変換は
+ * 速度・音程を変えた 1 パートの変換。Conversion の process フックは終端での flush ができないので、
+ * デコード → 区間でトリム → 速度・音程の変換（transform.ts） → エンコード、を手動でつなぐ。
+ * 変換は元のサンプルレート・チャンネル数のまま行い、モノラル化やサンプルレート変換は
  * AudioSampleSource の transform に任せる（出力側の設定は通常の再エンコードと同じ）。
  * 区間の境界は元ファイルの時間軸（絶対フレーム）で切り、出力のタイムスタンプは 0 始まりで連続させる。
  */
-async function convertSegmentAtSpeed(
+async function convertSegmentTransformed(
   input: Input,
   info: AudioInfo,
   output: Extract<OutputSpec, { kind: 'encode' }>,
   speed: number,
+  pitchRatio: number,
   seg: { start: number; end: number },
   onProgress: (fraction: number) => void,
   signal?: AbortSignal,
@@ -536,7 +542,7 @@ async function convertSegmentAtSpeed(
           srcRate = sample.sampleRate;
           startFrame = Math.round(seg.start * srcRate);
           endFrame = Math.round(seg.end * srcRate);
-          stretcher = createStretcher({ channels: sample.numberOfChannels, sampleRate: srcRate, rate: speed });
+          stretcher = createTransform({ channels: sample.numberOfChannels, sampleRate: srcRate, speed, pitchRatio });
         }
         // samples() は区間の外側のフレームも含みうるので、絶対フレーム番号でぴったり切る
         const abs0 = Math.round(sample.timestamp * srcRate);
