@@ -558,6 +558,35 @@ describe('runJob: export at a changed speed', () => {
   });
 });
 
+describe('runJob: export at a changed pitch', () => {
+  it('pitch only: the length stays the same', async () => {
+    const info = await probeFile(shortWav);
+    const parts = await runJob(
+      shortWav,
+      info,
+      { kind: 'points', points: [10] },
+      { kind: 'encode', format: 'wav', bitrate: 0, mono: false, pitchRatio: 2 ** (5 / 12) },
+    );
+    expect(parts).toHaveLength(2);
+    for (const p of parts) {
+      expect(Math.abs(p.durationSec - (p.endSec - p.startSec))).toBeLessThan(0.1);
+      expect((await inspect(p)).codec).toBe('pcm-s16');
+    }
+  });
+
+  it('tape mode (speed and pitch together): length is 1/speed', async () => {
+    const info = await probeFile(shortWav);
+    const parts = await runJob(
+      shortWav,
+      info,
+      { kind: 'points', points: [] },
+      { kind: 'encode', format: 'mp3', bitrate: 64000, mono: false, speed: 2, pitchRatio: 2 },
+    );
+    expect(Math.abs(parts[0].durationSec - 15)).toBeLessThan(0.3);
+    expect((await inspect(parts[0])).codec).toBe('mp3');
+  });
+});
+
 describe('zipParts', () => {
   it('stores parts uncompressed with Japanese names intact', async () => {
     const info = await probeFile(shortWav);

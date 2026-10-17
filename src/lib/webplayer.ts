@@ -1,14 +1,16 @@
 import { ALL_FORMATS, AudioSampleSink, BlobSource, Input } from 'mediabunny';
-import { createStretcher, type Stretcher } from './stretch';
+import type { Stretcher } from './stretch';
+import { createTransform, isIdentity } from './transform';
 
 /**
- * 逆再生。HTMLAudioElement は負の再生速度を鳴らせないので、Web Audio で自前で鳴らす。
+ * Web Audio で自前で鳴らすプレーヤー。<audio> ではできない再生に使う。
+ * - 逆再生（HTMLAudioElement は負の再生速度を鳴らせない）
+ * - 速度と独立に音程を変える再生（<audio> は「音程を保つ」か「速度に比例して変わる」かしか選べない）
  *
- * ファイル全体はデコードしない。現在位置から過去へ向かって数秒ずつ mediabunny でデコードし、
- * 反転して AudioBufferSourceNode を AudioContext の時計に合わせて隙間なく並べる。先読みは数秒分だけ。
- * 速度を変えるときは、反転済みの PCM に stretch.ts のタイムストレッチをかけて（ピッチは保つ）、
- * AudioBufferSourceNode は等速で鳴らす。ストレッチは 1 回の再生を通して 1 つの Stretcher を使い続けるので、
- * チャンクのつなぎ目で波形が途切れない（つなぎ目のクロスフェードは不要）。
+ * ファイル全体はデコードしない。現在位置から再生方向へ数秒ずつ mediabunny でデコードし（逆再生なら反転して）、
+ * AudioBufferSourceNode を AudioContext の時計に合わせて隙間なく並べる。先読みは数秒分だけ。
+ * 速度・音程を変えるときは、PCM に transform.ts の変換をかけて、AudioBufferSourceNode は等速で鳴らす。
+ * 変換は 1 回の再生を通して 1 つの処理器を使い続けるので、チャンクのつなぎ目で波形が途切れない。
  */
 
 /** 最初のチャンクは短くして、再生開始までの待ちを減らす（元の音声の秒数） */
@@ -28,7 +30,16 @@ const START_DELAY_SEC = 0.04;
 /** スケジューラを起こす間隔 */
 const KICK_MS = 150;
 
-export interface ReversePlayerOptions {
+export interface PlayParams {
+  /** 速さの倍率（元の音声の秒 / 再生の秒） */
+  speed: number;
+  /** 音程の倍率（2 で 1 オクターブ上） */
+  pitchRatio: number;
+  /** 逆向きに鳴らす */
+  reverse: boolean;
+}
+
+export interface WebAudioPlayerOptions {
   /** 再生を続けられなくなった（デコード失敗など）。日本語のメッセージ。再生は既に止まっている */
   onError: (message: string) => void;
 }
@@ -49,7 +60,7 @@ interface Placed {
   dur: number;
 }
 
-export class ReversePlayer {
+export class WebAudioPlayer {
   private ctx: AudioContext | null = null;
   private opening: Promise<Opened> | null = null;
   private opened: Opened | null = null;
@@ -61,23 +72,28 @@ export class ReversePlayer {
   private active = false;
   private lastPos = 0;
   private startSrc = 0;
-  private rate = 1;
-  private cursor = 0; // 次にデコードする区間の終端（元の音声の秒）
+  private speed = 1;
+  private reverse = false;
+  private cursor = 0; // 次にデコードする区間の端（逆再生なら終端、順再生なら始端。元の音声の秒）
   private exhausted = false;
   private first = true;
   private nextTime = 0; // 次の塊を並べる AudioContext の時刻
   private outScheduled = 0;
   private placed: Placed[] = [];
-  private stretcher: Stretcher | null = null;
+  private transform: Stretcher | null = null;
   private master: GainNode | null = null;
   private nodes = new Set<AudioBufferSourceNode>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
-  /** sampleRate: 元の音声のサンプルレート。AudioContext を同じレートで作ると、再生時のリサンプルが入らない */
+  /**
+   * sampleRate: 元の音声のサンプルレート。AudioContext を同じレートで作ると、再生時のリサンプルが入らない。
+   * durationSec: 全体の長さ（順再生の終わり）
+   */
   constructor(
     private readonly file: File,
     private readonly sampleRate: number,
-    private readonly opts: ReversePlayerOptions,
+    private readonly durationSec: number,
+    private readonly opts: WebAudioPlayerOptions,
   ) {}
 
   static isSupported(): boolean {
@@ -89,7 +105,7 @@ export class ReversePlayer {
     return this.active;
   }
 
-  /** 先頭（0 秒）まで鳴らし終えた */
+  /** 端まで（逆再生なら先頭、順再生なら末尾まで）鳴らし終えた */
   get finished(): boolean {
     const ctx = this.ctx;
     return this.active && this.exhausted && this.pumpingGen !== this.gen && !!ctx && ctx.currentTime >= this.nextTime - 0.001;
@@ -110,22 +126,25 @@ export class ReversePlayer {
     }
     // 古い塊は捨てる（直近の数個だけ残せば位置を求められる）
     while (this.placed.length > 4 && this.placed[1].ctxStart <= t - 1) this.placed.shift();
-    return Math.max(0, this.startSrc - elapsed * this.rate);
+    return this.reverse
+      ? Math.max(0, this.startSrc - elapsed * this.speed)
+      : Math.min(this.durationSec, this.startSrc + elapsed * this.speed);
   }
 
   /**
-   * fromSec から過去に向かって鳴らし始める。ユーザー操作の中（クリック・キー）から呼ぶこと
+   * fromSec から鳴らし始める。ユーザー操作の中（クリック・キー）から呼ぶこと
    * （AudioContext は操作の中でないと再生が始まらない）。失敗は onError に通知する。
    */
-  async start(fromSec: number, rate: number): Promise<void> {
+  async start(fromSec: number, params: PlayParams): Promise<void> {
     if (this.disposed) return;
     this.halt();
     const gen = ++this.gen;
     this.lastPos = fromSec;
     this.active = true; // 開始処理中も rAF から止まった位置が読めるよう、先に立てておく
-    this.exhausted = fromSec <= 0;
+    this.reverse = params.reverse;
+    this.exhausted = params.reverse ? fromSec <= 0 : fromSec >= this.durationSec;
     this.startSrc = fromSec;
-    this.rate = rate;
+    this.speed = params.speed;
     this.placed = [];
     try {
       const ctx = this.ensureContext();
@@ -137,8 +156,14 @@ export class ReversePlayer {
       this.first = true;
       this.nextTime = 0;
       this.outScheduled = 0;
-      this.stretcher =
-        rate === 1 ? null : createStretcher({ channels: o.channels, sampleRate: o.sampleRate, rate });
+      this.transform = isIdentity(params.speed, params.pitchRatio)
+        ? null
+        : createTransform({
+            channels: o.channels,
+            sampleRate: o.sampleRate,
+            speed: params.speed,
+            pitchRatio: params.pitchRatio,
+          });
       const master = ctx.createGain();
       master.connect(ctx.destination);
       this.master = master;
@@ -174,12 +199,12 @@ export class ReversePlayer {
   private fail(e: unknown): void {
     this.halt();
     const detail = e instanceof Error ? e.message : String(e);
-    this.opts.onError(`逆再生できませんでした（${detail}）。`);
+    this.opts.onError(`${this.reverse ? '逆再生' : '再生'}できませんでした（${detail}）。`);
   }
 
   private ensureContext(): AudioContext {
     if (!this.ctx) {
-      if (!ReversePlayer.isSupported()) throw new Error('このブラウザは Web Audio に対応していません');
+      if (!WebAudioPlayer.isSupported()) throw new Error('このブラウザは Web Audio に対応していません');
       try {
         this.ctx = new AudioContext({ sampleRate: this.sampleRate });
       } catch {
@@ -202,7 +227,7 @@ export class ReversePlayer {
     const nodes = this.nodes;
     this.master = null;
     this.nodes = new Set();
-    this.stretcher = null;
+    this.transform = null;
     this.placed = [];
     if (ctx && master) {
       // クリックが出ないよう短くフェードアウトしてから切る
@@ -262,18 +287,29 @@ export class ReversePlayer {
     this.pumpingGen = gen;
     try {
       while (gen === this.gen && !this.exhausted && this.nextTime - ctx.currentTime < LOOKAHEAD_SEC) {
-        const len = this.first ? FIRST_CHUNK_SEC : Math.min(CHUNK_MAX_SEC, Math.max(CHUNK_MIN_SEC, CHUNK_SEC * this.rate));
-        const hi = this.cursor;
-        let lo = Math.max(0, hi - len);
-        if (lo < MIN_TAIL_SEC) lo = 0;
-        const planes = await this.decodeReversed(o, lo, hi);
+        const len = this.first ? FIRST_CHUNK_SEC : Math.min(CHUNK_MAX_SEC, Math.max(CHUNK_MIN_SEC, CHUNK_SEC * this.speed));
+        let lo: number;
+        let hi: number;
+        let last: boolean;
+        if (this.reverse) {
+          hi = this.cursor;
+          lo = Math.max(0, hi - len);
+          if (lo < MIN_TAIL_SEC) lo = 0;
+          last = lo <= 0;
+        } else {
+          const end = this.durationSec;
+          lo = this.cursor;
+          hi = Math.min(end, lo + len);
+          if (end - hi < MIN_TAIL_SEC) hi = end;
+          last = hi >= end;
+        }
+        const planes = await this.decode(o, lo, hi, this.reverse);
         if (gen !== this.gen) return;
-        const last = lo <= 0;
         let out: Float32Array[] = planes;
-        if (this.stretcher) {
-          out = this.stretcher.push(planes);
+        if (this.transform) {
+          out = this.transform.push(planes);
           if (last) {
-            const rest = this.stretcher.flush();
+            const rest = this.transform.flush();
             out = out.map((p, c) => {
               const joined = new Float32Array(p.length + rest[c].length);
               joined.set(p);
@@ -283,7 +319,7 @@ export class ReversePlayer {
           }
         }
         this.place(ctx, o, out);
-        this.cursor = lo;
+        this.cursor = this.reverse ? lo : hi;
         this.first = false;
         if (last) this.exhausted = true;
       }
@@ -294,8 +330,8 @@ export class ReversePlayer {
     }
   }
 
-  /** [lo, hi) 秒をデコードして、フレームの並びを反転した planar を返す */
-  private async decodeReversed(o: Opened, lo: number, hi: number): Promise<Float32Array[]> {
+  /** [lo, hi) 秒をデコードして planar で返す。reversed ならフレームの並びを反転する */
+  private async decode(o: Opened, lo: number, hi: number, reversed: boolean): Promise<Float32Array[]> {
     const sr = o.sampleRate;
     const startFrame = Math.round(lo * sr);
     const n = Math.max(0, Math.round(hi * sr) - startFrame);
@@ -321,7 +357,7 @@ export class ReversePlayer {
         sample.close();
       }
     }
-    for (const p of planes) p.reverse();
+    if (reversed) for (const p of planes) p.reverse();
     return planes;
   }
 
