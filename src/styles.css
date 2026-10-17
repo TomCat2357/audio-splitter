@@ -298,12 +298,46 @@ kbd {
   flex-wrap: wrap;
   gap: 6px;
 }
+.btn-reverse {
+  margin-left: auto;
+}
+.btn[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.speed-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 12px;
+}
 .rate {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  margin-left: auto;
+  gap: 8px;
   font-size: 0.9rem;
+}
+.rate input[type='range'] {
+  width: 180px;
+  accent-color: var(--accent);
+}
+.rate-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.9rem;
+}
+.rate-num {
+  width: 5em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.rate-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 select,
 input[type='text'],
@@ -711,8 +745,11 @@ fieldset.plain:disabled {
   .seg-len {
     display: none;
   }
-  .rate {
+  .btn-reverse {
     margin-left: 0;
+  }
+  .rate input[type='range'] {
+    width: 140px;
   }
   .btn-split {
     width: 100%;

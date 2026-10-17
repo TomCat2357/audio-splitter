@@ -1,9 +1,10 @@
+import { useState } from 'react';
 import { useStoreValue } from '../hooks/useStoreValue';
 import type { Player } from '../hooks/usePlayer';
 import { formatTime } from '../lib/plan';
+import { MAX_RATE, MIN_RATE, RATE_PRESETS, RATE_STEP, formatRate } from '../lib/rate';
 import { Timeline } from './Timeline';
 
-const RATES = [0.75, 1, 1.25, 1.5, 2];
 const SKIPS = [
   { delta: -10, label: '−10 秒', aria: '10 秒戻る', id: 'back10' },
   { delta: -1, label: '−1 秒', aria: '1 秒戻る', id: 'back1' },
@@ -14,6 +15,34 @@ const SKIPS = [
 function CurrentTime({ player }: { player: Player }) {
   const t = useStoreValue(player.timeStore, (v) => formatTime(v, { fraction: true }));
   return <span data-testid="current-time">{t}</span>;
+}
+
+/** 倍率の数値入力。入力中は下書きのままにして、確定（Enter / フォーカスを外す）したときに範囲へ丸める */
+function RateInput({ player }: { player: Player }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = () => {
+    if (draft === null) return;
+    const n = Number(draft);
+    if (draft.trim() !== '' && Number.isFinite(n)) player.setRate(n);
+    setDraft(null);
+  };
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      className="rate-num"
+      aria-label="再生速度（倍）"
+      value={draft ?? formatRate(player.rate)}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit();
+        else if (e.key === 'Escape') setDraft(null);
+      }}
+      disabled={player.unplayable}
+      data-testid="rate-input"
+    />
+  );
 }
 
 interface Props {
@@ -87,22 +116,58 @@ export function PlayerPanel({
             </button>
           ))}
         </div>
+        <button
+          type="button"
+          className={`btn btn-sm btn-reverse${player.reverse ? ' is-on' : ''}`}
+          aria-pressed={player.reverse}
+          onClick={() => player.setReverse(!player.reverse)}
+          disabled={!player.canReverse}
+          title={player.canReverse ? '逆向きに再生します' : 'このファイルは逆再生できません'}
+          data-testid="reverse-toggle"
+        >
+          <span aria-hidden="true">◀ </span>逆再生
+        </button>
+      </div>
+
+      <div className="speed-row">
         <label className="rate">
           <span>再生速度</span>
-          <select
+          <input
+            type="range"
+            min={MIN_RATE}
+            max={MAX_RATE}
+            step={RATE_STEP}
             value={player.rate}
             onChange={(e) => player.setRate(Number(e.target.value))}
-            data-testid="rate-select"
             disabled={player.unplayable}
-          >
-            {RATES.map((r) => (
-              <option key={r} value={r}>
-                {r} 倍
-              </option>
-            ))}
-          </select>
+            aria-valuetext={`${formatRate(player.rate)} 倍`}
+            data-testid="rate-slider"
+          />
         </label>
+        <span className="rate-value">
+          <RateInput player={player} /> 倍
+        </span>
+        <div className="rate-presets" role="group" aria-label="よく使う速度">
+          {RATE_PRESETS.map((r) => (
+            <button
+              key={r}
+              type="button"
+              className="btn btn-sm"
+              aria-pressed={player.rate === r}
+              onClick={() => player.setRate(r)}
+              disabled={player.unplayable}
+              data-testid={`rate-preset-${r}`}
+            >
+              {r}
+            </button>
+          ))}
+        </div>
       </div>
+      {player.reverseError && (
+        <p className="msg msg-warn" role="status" data-testid="reverse-error">
+          {player.reverseError}
+        </p>
+      )}
 
       <Timeline
         duration={duration}
@@ -126,7 +191,7 @@ export function PlayerPanel({
           <kbd aria-hidden="true">S</kbd>
         </button>
         <p className="hint">
-          ショートカット: <kbd>Space</kbd> 再生/一時停止、<kbd>S</kbd> 現在位置で分割。マーカーは左右キーで動かし、Delete で削除できます。
+          ショートカット: <kbd>Space</kbd> 再生/一時停止、<kbd>S</kbd> 現在位置で分割、<kbd>[</kbd> <kbd>]</kbd> 再生速度を 0.25 ずつ下げる/上げる、<kbd>\</kbd> または <kbd>=</kbd> で 1 倍に戻す。マーカーは左右キーで動かし、Delete で削除できます。
         </p>
       </div>
       <p

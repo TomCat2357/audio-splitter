@@ -1,4 +1,5 @@
 import { formatBytes, isPcmFormat } from '../lib/plan';
+import { formatRate } from '../lib/rate';
 import type { AudioInfo, EncodeFormat } from '../lib/types';
 
 export interface OutputState {
@@ -8,6 +9,13 @@ export interface OutputState {
   mono: boolean;
   /** Hz。0 = 元のまま。WAV / FLAC のときだけ効く */
   sampleRate: number;
+  /** 現在の再生速度で書き出す（既定オフ）。再生速度が 1 倍のときは効かない */
+  atSpeed: boolean;
+}
+
+/** 再生速度を反映して書き出すか。反映するときは無劣化コピーが使えず、再エンコードになる */
+export function isSpeedExportActive(value: OutputState, rate: number, info: AudioInfo): boolean {
+  return value.atSpeed && rate !== 1 && info.canDecode;
 }
 
 export const BITRATES = [32, 48, 64, 96, 128, 192];
@@ -36,13 +44,17 @@ interface Props {
   totalBytes: number;
   /** 形式ごとに書き出せるか。null = 調べている最中 */
   support: Record<EncodeFormat, boolean> | null;
+  /** いまの再生速度（倍） */
+  rate: number;
 }
 
-export function OutputSettings({ info, value, onChange, locked, totalBytes, support }: Props) {
+export function OutputSettings({ info, value, onChange, locked, totalBytes, support, rate }: Props) {
   const set = (patch: Partial<OutputState>) => onChange({ ...value, ...patch });
   const copyOk = info.copyFormat !== null;
   const encodeOk = info.canDecode;
-  const encoding = value.kind === 'encode';
+  const speedOn = isSpeedExportActive(value, rate, info);
+  // 速度を変えて書き出すときは、選択に関わらず再エンコードになる
+  const encoding = value.kind === 'encode' || speedOn;
   const ratio = info.fileSize > 0 ? Math.round((totalBytes / info.fileSize) * 100) : 0;
   const pcm = isPcmFormat(value.format);
   const opusOk = support?.ogg === true;
@@ -53,21 +65,23 @@ export function OutputSettings({ info, value, onChange, locked, totalBytes, supp
       <h2 id="out-h">出力の設定</h2>
       <fieldset className="plain" disabled={locked}>
         <div className="radio-cards" role="radiogroup" aria-label="出力のしかた">
-          <label className={`radio-card${value.kind === 'copy' ? ' is-on' : ''}${copyOk ? '' : ' is-disabled'}`}>
+          <label className={`radio-card${!encoding ? ' is-on' : ''}${copyOk && !speedOn ? '' : ' is-disabled'}`}>
             <input
               type="radio"
               name="out-kind"
-              checked={value.kind === 'copy'}
-              disabled={!copyOk}
+              checked={!encoding}
+              disabled={!copyOk || speedOn}
               onChange={() => set({ kind: 'copy' })}
               data-testid="output-copy"
             />
             <span>
               <strong>元の音質のまま（無劣化・高速）</strong>
               <span className="sub">
-                {copyOk
-                  ? `出力形式: ${info.copyFormat!.label}`
-                  : 'この音声は元の形式のままでは書き出せません。形式を変換する方を選んでください。'}
+                {speedOn
+                  ? '再生速度を変えて書き出すときは使えません（再エンコードになります）。'
+                  : copyOk
+                    ? `出力形式: ${info.copyFormat!.label}`
+                    : 'この音声は元の形式のままでは書き出せません。形式を変換する方を選んでください。'}
               </span>
             </span>
           </label>
@@ -91,6 +105,30 @@ export function OutputSettings({ info, value, onChange, locked, totalBytes, supp
             </span>
           </label>
         </div>
+
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={value.atSpeed}
+            disabled={!encodeOk}
+            onChange={(e) => set({ atSpeed: e.target.checked })}
+            data-testid="at-speed-checkbox"
+          />
+          <span>
+            現在の再生速度（×{formatRate(rate)}）で書き出す
+            <span className="sub" data-testid="at-speed-note">
+              {!encodeOk
+                ? 'このブラウザではこの音声を読み取れないため使えません。'
+                : speedOn
+                  ? '再エンコードで書き出します（元の音質のままのコピーは使えません）。音程は変わらず、長さが 1/' +
+                    formatRate(rate) +
+                    ' になります。'
+                  : value.atSpeed
+                    ? 'いまの再生速度は 1 倍なので、そのままの速さで書き出されます。速度を変えるとその速さになります。'
+                    : '音程を変えずに、速さだけ変えて書き出します。再エンコードになります。'}
+            </span>
+          </span>
+        </label>
 
         {encoding && (
           <div className="encode-opts">

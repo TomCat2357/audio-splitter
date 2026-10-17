@@ -466,6 +466,98 @@ describe('runJob: abort', () => {
   });
 });
 
+describe('runJob: export at a changed speed', () => {
+  const wavSpec = (speed: number, extra: object = {}) =>
+    ({ kind: 'encode', format: 'wav', bitrate: 0, mono: false, speed, ...extra }) as const;
+
+  for (const [speed, expected] of [
+    [2, 15],
+    [0.5, 60],
+  ] as const) {
+    it(`WAV x${speed}: output length is about 1/${speed} of the original`, async () => {
+      const info = await probeFile(shortWav);
+      const parts = await runJob(shortWav, info, { kind: 'points', points: [] }, wavSpec(speed));
+      expect(parts).toHaveLength(1);
+      expect(Math.abs(parts[0].durationSec - expected)).toBeLessThan(0.3);
+      const m = await inspect(parts[0]);
+      expect(m.codec).toBe('pcm-s16');
+      expect(m.channels).toBe(2);
+      expect(Math.abs(m.duration - expected)).toBeLessThan(0.3);
+    });
+  }
+
+  it('splits on the original time axis; each part is 1/speed long', async () => {
+    const info = await probeFile(shortWav);
+    const progress: number[] = [];
+    const parts = await runJob(shortWav, info, { kind: 'points', points: [10, 20] }, wavSpec(2), {
+      onProgress: (p) => progress.push(p.overall),
+    });
+    expect(parts).toHaveLength(3);
+    expect(parts.map((p) => [p.startSec, p.endSec])).toEqual([
+      [0, 10],
+      [10, 20],
+      [20, info.durationSec],
+    ]);
+    for (const p of parts) expect(Math.abs(p.durationSec - (p.endSec - p.startSec) / 2)).toBeLessThan(0.1);
+    expect(progress[progress.length - 1]).toBeCloseTo(1, 5);
+    for (let i = 1; i < progress.length; i++) expect(progress[i]).toBeGreaterThanOrEqual(progress[i - 1] - 1e-9);
+  });
+
+  it('works with mono and a changed sample rate', async () => {
+    const info = await probeFile(shortWav);
+    const parts = await runJob(
+      shortWav,
+      info,
+      { kind: 'points', points: [1.3333333, 6.6666] },
+      wavSpec(1.5, { mono: true, sampleRate: 22050 }),
+    );
+    expect(parts).toHaveLength(3);
+    for (const p of parts) {
+      expect((await inspect(p)).channels).toBe(1);
+      expect(await sampleRateOf(p)).toBe(22050);
+      expect(Math.abs(p.durationSec - (p.endSec - p.startSec) / 1.5)).toBeLessThan(0.1);
+    }
+  });
+
+  it('works with m4a and flac output', async () => {
+    const info = await probeFile(shortWav);
+    for (const [format, codec] of [
+      ['m4a', 'aac'],
+      ['flac', 'flac'],
+    ] as const) {
+      const parts = await runJob(
+        shortWav,
+        info,
+        { kind: 'points', points: [] },
+        { kind: 'encode', format, bitrate: 64000, mono: false, speed: 1.5 },
+      );
+      expect((await inspect(parts[0])).codec).toBe(codec);
+      expect(Math.abs(parts[0].durationSec - 20)).toBeLessThan(0.3);
+    }
+  });
+
+  it('maxSize: parts fit the limit and their total is about 1/speed long', async () => {
+    const info = await probeFile(shortWav);
+    const maxBytes = 400_000;
+    const parts = await runJob(shortWav, info, { kind: 'maxSize', maxBytes }, wavSpec(2));
+    expect(parts.length).toBeGreaterThan(1);
+    for (const p of parts) expect(p.blob.size).toBeLessThanOrEqual(maxBytes);
+    const total = parts.reduce((n, p) => n + p.durationSec, 0);
+    expect(Math.abs(total - 15)).toBeLessThan(0.5);
+    // 分割点は元の時間軸でつながっている
+    for (let i = 1; i < parts.length; i++) expect(parts[i].startSec).toBeCloseTo(parts[i - 1].endSec, 6);
+  });
+
+  it('can be aborted', async () => {
+    const info = await probeFile(shortWav);
+    const ac = new AbortController();
+    ac.abort();
+    await expect(
+      runJob(shortWav, info, { kind: 'points', points: [] }, wavSpec(2), { signal: ac.signal }),
+    ).rejects.toSatisfy(isAbortError);
+  });
+});
+
 describe('zipParts', () => {
   it('stores parts uncompressed with Japanese names intact', async () => {
     const info = await probeFile(shortWav);

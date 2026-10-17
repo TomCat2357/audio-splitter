@@ -14,11 +14,13 @@ import {
   OggOutputFormat,
   Output,
   Quality,
+  AudioSample,
+  AudioSampleSink,
+  AudioSampleSource,
   WavOutputFormat,
   WebMOutputFormat,
   canEncodeAudio,
   type AudioCodec,
-  type AudioSample,
   type OutputFormat,
 } from 'mediabunny';
 import type {
@@ -37,6 +39,7 @@ import {
   segmentsFromPoints,
   singleSuffixFor,
 } from './plan';
+import { createStretcher, type Stretcher } from './stretch';
 
 // ---------------------------------------------------------------------------
 // 出力形式の定義
@@ -379,6 +382,10 @@ async function convertSegmentOnce(
 ): Promise<PartResult> {
   if (signal?.aborted) throw abortError();
 
+  if (output.kind === 'encode' && output.speed && output.speed !== 1) {
+    return await convertSegmentAtSpeed(input, info, output, output.speed, seg, onProgress, signal);
+  }
+
   let format: OutputFormat;
   let encodeParams: EncodeParams | null = null;
   if (output.kind === 'copy') {
@@ -444,20 +451,125 @@ async function convertSegmentOnce(
   if (!buffer) throw new Error('出力データが生成されませんでした。');
   const bytes = new Uint8Array(buffer);
 
-  // 出力ファイルの実際の長さを測る（失敗したら区間長で代用）
-  let durationSec = seg.end - seg.start;
+  return { bytes, durationSec: await measureDuration(bytes, seg.end - seg.start) };
+}
+
+/** 出力ファイルの実際の長さを測る（失敗したら fallbackSec で代用） */
+async function measureDuration(bytes: Uint8Array, fallbackSec: number): Promise<number> {
   try {
     const check = new Input({ source: new BufferSource(bytes), formats: ALL_FORMATS });
     try {
       const d = await check.computeDuration();
-      if (Number.isFinite(d) && d > 0) durationSec = d;
+      if (Number.isFinite(d) && d > 0) return d;
     } finally {
       check.dispose();
     }
   } catch {
     // ignore
   }
-  return { bytes, durationSec };
+  return fallbackSec;
+}
+
+/**
+ * 速度を変えた 1 パートの変換。Conversion の process フックは終端での flush ができないので、
+ * デコード → 区間でトリム → タイムストレッチ → エンコード、を手動でつなぐ。
+ * ストレッチは元のサンプルレート・チャンネル数のまま行い、モノラル化やサンプルレート変換は
+ * AudioSampleSource の transform に任せる（出力側の設定は通常の再エンコードと同じ）。
+ * 区間の境界は元ファイルの時間軸（絶対フレーム）で切り、出力のタイムスタンプは 0 始まりで連続させる。
+ */
+async function convertSegmentAtSpeed(
+  input: Input,
+  info: AudioInfo,
+  output: Extract<OutputSpec, { kind: 'encode' }>,
+  speed: number,
+  seg: { start: number; end: number },
+  onProgress: (fraction: number) => void,
+  signal?: AbortSignal,
+): Promise<PartResult> {
+  const track = await input.getPrimaryAudioTrack();
+  if (!track) throw new Error('このファイルには音声トラックがありません。');
+  const params = await resolveEncodeParams(info, output);
+  await ensureEncoder(params);
+
+  const out = new Output({ format: ENCODE_TARGETS[output.format].make(), target: new BufferTarget() });
+  const source = new AudioSampleSource({
+    codec: params.codec,
+    ...(params.bitrate !== null ? { quality: new Quality({ bitrate: params.bitrate }) } : {}),
+    transform: { numberOfChannels: params.numberOfChannels, sampleRate: params.sampleRate },
+  });
+  out.addAudioTrack(source);
+
+  const segLen = seg.end - seg.start;
+  let stretcher: Stretcher | null = null;
+  let srcRate = 0;
+  let startFrame = 0;
+  let endFrame = 0;
+  let outFrames = 0;
+
+  const writePlanes = async (planes: Float32Array[]) => {
+    const n = planes.length > 0 ? planes[0].length : 0;
+    if (n === 0) return; // 0 フレームのサンプルはエンコーダが落ちるので渡さない
+    const data = new Float32Array(n * planes.length);
+    planes.forEach((p, c) => data.set(p, c * n)); // f32-planar は各チャンネルを順に連結した並び
+    const s = new AudioSample({
+      data,
+      format: 'f32-planar',
+      numberOfChannels: planes.length,
+      sampleRate: srcRate,
+      timestamp: outFrames / srcRate,
+    });
+    outFrames += n;
+    try {
+      await source.add(s);
+    } finally {
+      s.close();
+    }
+  };
+
+  try {
+    await out.start();
+    const sink = new AudioSampleSink(track);
+    for await (const sample of sink.samples(seg.start, seg.end)) {
+      try {
+        if (signal?.aborted) throw abortError();
+        if (!stretcher) {
+          srcRate = sample.sampleRate;
+          startFrame = Math.round(seg.start * srcRate);
+          endFrame = Math.round(seg.end * srcRate);
+          stretcher = createStretcher({ channels: sample.numberOfChannels, sampleRate: srcRate, rate: speed });
+        }
+        // samples() は区間の外側のフレームも含みうるので、絶対フレーム番号でぴったり切る
+        const abs0 = Math.round(sample.timestamp * srcRate);
+        const from = Math.max(abs0, startFrame) - abs0;
+        const to = Math.min(abs0 + sample.numberOfFrames, endFrame) - abs0;
+        if (to > from) {
+          const planes: Float32Array[] = [];
+          for (let c = 0; c < sample.numberOfChannels; c++) {
+            const plane = new Float32Array(to - from);
+            sample.copyTo(plane, { planeIndex: c, format: 'f32-planar', frameOffset: from, frameCount: to - from });
+            planes.push(plane);
+          }
+          await writePlanes(stretcher.push(planes));
+        }
+        onProgress(Math.min(1, Math.max(0, (sample.timestamp + sample.duration - seg.start) / segLen)));
+      } finally {
+        sample.close();
+      }
+    }
+    if (!stretcher) throw new Error('この区間には音声がありませんでした。');
+    await writePlanes(stretcher.flush());
+    if (signal?.aborted) throw abortError();
+    await out.finalize();
+  } catch (e) {
+    await out.cancel().catch(() => {});
+    if (isAbortError(e) || signal?.aborted) throw abortError();
+    throw new Error(`変換中にエラーが発生しました: ${describeError(e)}`);
+  }
+
+  const buffer = out.target.buffer;
+  if (!buffer) throw new Error('出力データが生成されませんでした。');
+  const bytes = new Uint8Array(buffer);
+  return { bytes, durationSec: await measureDuration(bytes, segLen / speed) };
 }
 
 // ---------------------------------------------------------------------------

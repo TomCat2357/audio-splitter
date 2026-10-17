@@ -163,9 +163,20 @@ export function isPcmFormat(format: EncodeFormat): boolean {
   return format === 'wav' || format === 'flac';
 }
 
-/** 出力 1 秒あたりのバイト数の見積もり。 */
+/**
+ * 元の音声 1 秒あたりのバイト数の見積もり。
+ * 速度を変えて書き出すとき（speed 倍）は、元の 1 秒が出力では 1/speed 秒になるので 1/speed 倍になる。
+ */
 export function estimateOutputBytesPerSec(info: AudioInfo, output: OutputSpec): number {
   if (output.kind === 'copy') return info.audioBitrate / 8;
+  const speed = output.speed && output.speed > 0 ? output.speed : 1;
+  return estimateEncodedBytesPerOutputSec(info, output) / speed;
+}
+
+function estimateEncodedBytesPerOutputSec(
+  info: AudioInfo,
+  output: Extract<OutputSpec, { kind: 'encode' }>,
+): number {
   if (isPcmFormat(output.format)) {
     const rate = output.sampleRate ?? info.sampleRate;
     const channels = output.mono ? 1 : info.numberOfChannels;

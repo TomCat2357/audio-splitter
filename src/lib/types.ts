@@ -28,6 +28,8 @@ export type OutputSpec =
       mono: boolean;
       /** Hz。wav / flac でだけ有効。未指定 = 元のまま */
       sampleRate?: number;
+      /** 再生速度の倍率で書き出す（ピッチは保つ）。未指定または 1 = 元の速さ */
+      speed?: number;
     };
 
 export type SplitPlan =

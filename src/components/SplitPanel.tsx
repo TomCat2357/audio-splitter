@@ -19,6 +19,8 @@ interface Props {
   error: string | null;
   points: number[];
   rows: SegmentRow[];
+  /** 書き出すときの速度の倍率。できあがるファイルの長さは区間の長さの 1/speed になる */
+  speed: number;
   locked: boolean;
   onAdjustManually: () => void;
   onCommitPoint: (index: number, sec: number) => boolean;
@@ -203,7 +205,7 @@ export function SplitPanel(p: Props) {
               <span className="seg-range">
                 {formatTime(r.start)} 〜 {formatTime(r.end)}
               </span>
-              <span className="seg-len">長さ {formatTime(r.end - r.start)}</span>
+              <span className="seg-len">長さ {formatTime((r.end - r.start) / p.speed)}</span>
               <span className="seg-size">約 {formatBytes(r.bytes)}</span>
             </button>
           </li>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FileSection, type ProbeState } from './components/FileSection';
-import { OutputSettings, type OutputState } from './components/OutputSettings';
+import { OutputSettings, isSpeedExportActive, type OutputState } from './components/OutputSettings';
 import { PlayerPanel } from './components/PlayerPanel';
 import { Results, type ResultItem } from './components/Results';
 import { RunPanel, type RunState } from './components/RunPanel';
@@ -27,7 +27,7 @@ import { zipParts } from './lib/zip';
 
 type Notice = { text: string; tone: 'info' | 'warn' };
 
-const DEFAULT_OUTPUT: OutputState = { kind: 'copy', format: 'm4a', bitrateKbps: 64, mono: false, sampleRate: 0 };
+const DEFAULT_OUTPUT: OutputState = { kind: 'copy', format: 'm4a', bitrateKbps: 64, mono: false, sampleRate: 0, atSpeed: false };
 
 function stemOf(name: string): string {
   const dot = name.lastIndexOf('.');
@@ -42,7 +42,11 @@ export default function App() {
   const [pendingName, setPendingName] = useState<string | null>(null);
   const inputUrl = useObjectUrl(file);
   const duration = info?.durationSec ?? 0;
-  const player = usePlayer(inputUrl, duration);
+  const reverseSource = useMemo(
+    () => (file && info?.canDecode ? { file, sampleRate: info.sampleRate } : null),
+    [file, info],
+  );
+  const player = usePlayer(inputUrl, duration, reverseSource);
 
   const [mode, setMode] = useState<SplitMode>('interval');
   const [values, setValues] = useState<SplitValues>(DEFAULT_VALUES);
@@ -161,9 +165,12 @@ export default function App() {
   }, []);
 
   // ---- 出力・分割の導出値 ----
+  // 再生速度を反映して書き出すときは再エンコードになる（無劣化コピーでは速度を変えられない）
+  const speedOn = info ? isSpeedExportActive(output, player.rate, info) : false;
+  const encoding = output.kind === 'encode' || speedOn;
   const outputSpec: OutputSpec = useMemo(
     () =>
-      output.kind === 'copy'
+      !encoding
         ? { kind: 'copy' }
         : {
             kind: 'encode',
@@ -172,8 +179,9 @@ export default function App() {
             mono: output.mono,
             // サンプルレートは WAV / FLAC のときだけ有効（他の形式では裏に残った値を使わない）
             sampleRate: isPcmFormat(output.format) && output.sampleRate > 0 ? output.sampleRate : undefined,
+            speed: speedOn ? player.rate : undefined,
           },
-    [output],
+    [output, encoding, speedOn, player.rate],
   );
   const bytesPerSec = info ? estimateOutputBytesPerSec(info, outputSpec) : 0;
   const settingsError = info ? validateSettings(mode, values, duration, bytesPerSec) : null;
@@ -252,12 +260,18 @@ export default function App() {
     }
   };
 
-  useShortcuts({ enabled: info !== null, onTogglePlay: player.toggle, onSplit: splitHere });
+  useShortcuts({
+    enabled: info !== null,
+    onTogglePlay: player.toggle,
+    onSplit: splitHere,
+    onRateStep: player.stepRate,
+    onRateReset: player.resetRate,
+  });
 
   // ---- 実行 ----
   const outputUnavailable =
     info !== null &&
-    ((output.kind === 'copy' && !info.copyFormat) || (output.kind === 'encode' && !info.canDecode));
+    ((!encoding && !info.copyFormat) || (encoding && !info.canDecode));
   const runDisabled = !info || !file || settingsError !== null || outputUnavailable || busy;
   const disabledReason = settingsError
     ? settingsError
@@ -360,6 +374,7 @@ export default function App() {
               error={settingsError}
               points={points}
               rows={rows}
+              speed={speedOn ? player.rate : 1}
               locked={busy}
               onAdjustManually={() => handoverToManual(points)}
               onCommitPoint={onCommitPoint}
@@ -376,9 +391,10 @@ export default function App() {
             />
             <OutputSettings info={info} value={output} onChange={setOutput} locked={busy} totalBytes={totalBytes}
               support={encodeSupport}
+              rate={player.rate}
             />
             <RunPanel
-              label={runLabel(mode, partCount, output.kind === 'encode', output.kind === 'encode' && isPcmFormat(output.format))}
+              label={runLabel(mode, partCount, encoding, encoding && isPcmFormat(output.format))}
               disabled={runDisabled}
               disabledReason={disabledReason}
               state={runState}
