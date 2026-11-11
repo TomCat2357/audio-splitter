@@ -11,3 +11,6 @@ test-fixtures/
 *.log
 .claude/
 .playwright-mcp/
+
+# 認証情報・環境変数ファイル
+.clasprc.json
