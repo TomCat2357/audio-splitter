@@ -614,10 +614,12 @@ export async function runJob(
   const mime = output.kind === 'copy' ? info.copyFormat!.mime : ENCODE_TARGETS[output.format].mime;
   const total = info.durationSec;
   const parts: OutputPart[] = [];
+  // 進み具合の分母（一部の区間だけ書き出すときは、選んだ区間の長さの合計）
+  let progressTotal = total;
 
   const emit: Emit = (doneSec, partIndex, estimatedParts) => {
     cb.onProgress?.({
-      overall: Math.min(1, Math.max(0, doneSec / total)),
+      overall: progressTotal > 0 ? Math.min(1, Math.max(0, doneSec / progressTotal)) : 1,
       partIndex,
       estimatedParts,
     });
@@ -641,11 +643,15 @@ export async function runJob(
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
   try {
     if (plan.kind === 'points') {
-      const segs = segmentsFromPoints(plan.points, total);
+      const allSegs = segmentsFromPoints(plan.points, total);
+      const only = plan.only ? new Set(plan.only) : null;
+      const picked = allSegs.map((seg, i) => ({ seg, i })).filter(({ i }) => !only || only.has(i));
+      if (picked.length === 0) throw new Error('書き出す区間が選ばれていません。');
+      progressTotal = picked.reduce((s, { seg }) => s + (seg.end - seg.start), 0);
       let done = 0;
-      emit(0, 0, segs.length);
-      for (let i = 0; i < segs.length; i++) {
-        const seg = segs[i];
+      emit(0, 0, picked.length);
+      for (let k = 0; k < picked.length; k++) {
+        const { seg, i } = picked[k];
         const len = seg.end - seg.start;
         const base = done;
         const r = await convertSegment(
@@ -653,12 +659,12 @@ export async function runJob(
           info,
           output,
           seg,
-          (f) => emit(base + f * len, i, segs.length),
+          (f) => emit(base + f * len, k, picked.length),
           cb.signal,
         );
         done += len;
-        finish(i, segs.length, seg, r);
-        emit(done, Math.min(i + 1, segs.length - 1), segs.length);
+        finish(i, allSegs.length, seg, r);
+        emit(done, Math.min(k + 1, picked.length - 1), picked.length);
       }
     } else {
       await runMaxSize(input, info, plan.maxBytes, output, cb.signal, emit, finish);

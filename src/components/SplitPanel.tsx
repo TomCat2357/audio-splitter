@@ -19,6 +19,12 @@ interface Props {
   error: string | null;
   points: number[];
   rows: SegmentRow[];
+  /** 区間ごとに書き出すかどうかを選べるか */
+  pickable: boolean;
+  /** 書き出さない区間の番号 */
+  excluded: ReadonlySet<number>;
+  onTogglePicked: (index: number) => void;
+  onPickAll: (on: boolean) => void;
   /** 書き出すときの速度の倍率。できあがるファイルの長さは区間の長さの 1/speed になる */
   speed: number;
   locked: boolean;
@@ -60,6 +66,7 @@ function NumberField(props: {
 
 export function SplitPanel(p: Props) {
   const auto = p.mode === 'interval' || p.mode === 'count' || p.mode === 'maxSize';
+  const pickedCount = p.pickable ? p.rows.length - p.excluded.size : p.rows.length;
   const set = (patch: Partial<SplitValues>) => p.onValues({ ...p.values, ...patch });
 
   return (
@@ -189,27 +196,68 @@ export function SplitPanel(p: Props) {
       </fieldset>
 
       <h3>
-        できあがるファイル（{p.rows.length} 個）
+        できあがるファイル（
+        {pickedCount < p.rows.length ? `${p.rows.length} 個のうち ${pickedCount} 個を書き出す` : `${p.rows.length} 個`}）
       </h3>
-      <ol className="seg-list" data-testid="segment-list">
-        {p.rows.map((r) => (
-          <li key={r.index}>
+      {p.pickable && (
+        <div className="seg-pick-bar">
+          <p className="hint">チェックを外した区間は書き出しません（ファイル名の番号は全体での番号のままです）。</p>
+          <div className="seg-pick-buttons">
             <button
               type="button"
-              className={`seg-row seg-row-${r.index % 2 === 0 ? 'a' : 'b'}`}
-              onClick={() => p.onSeek(r.start)}
-              aria-label={`${r.index + 1} 個目の先頭へ移動`}
-              data-testid="segment-row"
+              className="btn btn-sm"
+              onClick={() => p.onPickAll(true)}
+              disabled={p.locked || p.excluded.size === 0}
+              data-testid="pick-all"
             >
-              <span className="seg-no">{r.index + 1}</span>
-              <span className="seg-range">
-                {formatTime(r.start)} 〜 {formatTime(r.end)}
-              </span>
-              <span className="seg-len">長さ {formatTime((r.end - r.start) / p.speed)}</span>
-              <span className="seg-size">約 {formatBytes(r.bytes)}</span>
+              すべて選ぶ
             </button>
-          </li>
-        ))}
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => p.onPickAll(false)}
+              disabled={p.locked || pickedCount === 0}
+              data-testid="pick-none"
+            >
+              すべて外す
+            </button>
+          </div>
+        </div>
+      )}
+      <ol className="seg-list" data-testid="segment-list">
+        {p.rows.map((r) => {
+          const picked = !p.excluded.has(r.index);
+          return (
+            <li key={r.index} className={`seg-item${picked ? '' : ' is-off'}`}>
+              {p.pickable && (
+                <label className="seg-pick">
+                  <input
+                    type="checkbox"
+                    checked={picked}
+                    disabled={p.locked}
+                    onChange={() => p.onTogglePicked(r.index)}
+                    aria-label={`${r.index + 1} 個目を書き出す`}
+                    data-testid="segment-pick"
+                  />
+                </label>
+              )}
+              <button
+                type="button"
+                className={`seg-row seg-row-${r.index % 2 === 0 ? 'a' : 'b'}`}
+                onClick={() => p.onSeek(r.start)}
+                aria-label={`${r.index + 1} 個目の先頭へ移動`}
+                data-testid="segment-row"
+              >
+                <span className="seg-no">{r.index + 1}</span>
+                <span className="seg-range">
+                  {formatTime(r.start)} 〜 {formatTime(r.end)}
+                </span>
+                <span className="seg-len">長さ {formatTime((r.end - r.start) / p.speed)}</span>
+                <span className="seg-size">約 {formatBytes(r.bytes)}</span>
+              </button>
+            </li>
+          );
+        })}
       </ol>
     </section>
   );

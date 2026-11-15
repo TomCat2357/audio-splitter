@@ -35,7 +35,12 @@ export type OutputSpec =
     };
 
 export type SplitPlan =
-  | { kind: 'points'; points: number[] } // 分割点（秒）。空配列なら分割なしで 1 ファイル
+  | {
+      kind: 'points';
+      points: number[]; // 分割点（秒）。空配列なら分割なしで 1 ファイル
+      /** 書き出す区間の番号（0 始まり）。未指定 = すべて。ファイル名の番号は全体での番号のまま */
+      only?: number[];
+    }
   | { kind: 'maxSize'; maxBytes: number }; // 各パートがこのサイズ以下になるよう自動分割
 
 export interface OutputPart {

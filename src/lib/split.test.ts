@@ -3,6 +3,7 @@ import {
   DEFAULT_VALUES,
   MB,
   buildPlan,
+  canPickSegments,
   displayPointsFor,
   parseNumber,
   runLabel,
@@ -54,6 +55,26 @@ describe('displayPointsFor / buildPlan', () => {
     expect(buildPlan('maxSize', { ...vals, maxMB: '1' }, pts)).toEqual({ kind: 'maxSize', maxBytes: MB });
     expect(buildPlan('none', vals, [3])).toEqual({ kind: 'points', points: [] });
     expect(buildPlan('manual', vals, [3])).toEqual({ kind: 'points', points: [3] });
+  });
+});
+
+describe('区間の選択', () => {
+  it('外した区間を除いた番号を計画に入れる', () => {
+    expect(buildPlan('manual', vals, [3, 6], new Set([1]))).toEqual({ kind: 'points', points: [3, 6], only: [0, 2] });
+    expect(buildPlan('interval', vals, [3, 6], new Set())).toEqual({ kind: 'points', points: [3, 6] });
+    expect(buildPlan('maxSize', { ...vals, maxMB: '1' }, [3], new Set([0]))).toEqual({ kind: 'maxSize', maxBytes: MB });
+  });
+  it('選べるモード', () => {
+    expect(canPickSegments('manual', 3)).toBe(true);
+    expect(canPickSegments('interval', 1)).toBe(false);
+    expect(canPickSegments('maxSize', 3)).toBe(false);
+    expect(canPickSegments('none', 1)).toBe(false);
+  });
+  it('一部だけのときのボタンの文言', () => {
+    expect(runLabel('interval', 5, false, false, 2)).toBe('5 個のうち 2 個を書き出す');
+    expect(runLabel('count', 5, true, false, 3)).toBe('5 個のうち 3 個を圧縮して書き出す');
+    expect(runLabel('count', 5, true, true, 3)).toBe('5 個のうち 3 個を変換して書き出す');
+    expect(runLabel('count', 5, false, false, 5)).toBe('5 個に分割して書き出す');
   });
 });
 
