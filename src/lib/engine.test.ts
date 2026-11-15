@@ -119,6 +119,34 @@ describe('runJob: copy split', () => {
     });
   }
 
+  it('exports only the picked segments, keeping their overall numbering', async () => {
+    const info = await probeFile(wavFile);
+    const progress: { overall: number; partIndex: number; estimatedParts: number }[] = [];
+    const parts = await runJob(
+      wavFile,
+      info,
+      { kind: 'points', points: [20, 40], only: [0, 2] },
+      { kind: 'copy' },
+      { onProgress: (p) => progress.push(p) },
+    );
+    expect(parts.map((p) => p.fileName)).toEqual(['test_01.wav', 'test_03.wav']);
+    expect(parts.map((p) => p.index)).toEqual([0, 2]);
+    expect(parts[1].startSec).toBe(40);
+    expect(parts[1].durationSec).toBeGreaterThan(info.durationSec - 40 - 0.1);
+    expect(progress.every((p) => p.estimatedParts === 2)).toBe(true);
+    expect(progress[progress.length - 1].overall).toBeCloseTo(1, 5);
+    for (let i = 1; i < progress.length; i++) {
+      expect(progress[i].overall).toBeGreaterThanOrEqual(progress[i - 1].overall - 1e-9);
+    }
+  });
+
+  it('rejects a job with no picked segment', async () => {
+    const info = await probeFile(shortWav);
+    await expect(
+      runJob(shortWav, info, { kind: 'points', points: [10], only: [] }, { kind: 'copy' }),
+    ).rejects.toThrow('書き出す区間');
+  });
+
   it('no split (empty points) gives one file with a non-overwriting name', async () => {
     const info = await probeFile(m4aFile);
     const parts = await runJob(m4aFile, info, { kind: 'points', points: [] }, { kind: 'copy' });

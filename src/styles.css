@@ -632,6 +632,48 @@ fieldset.plain:disabled {
 .seg-no {
   font-weight: 700;
 }
+.seg-item {
+  display: flex;
+  align-items: stretch;
+}
+.seg-item .seg-row {
+  flex: 1;
+  min-width: 0;
+}
+.seg-pick {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  flex: none;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.seg-pick input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  cursor: pointer;
+}
+.seg-item.is-off .seg-row {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+.seg-pick-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.seg-pick-bar .hint {
+  margin: 0;
+}
+.seg-pick-buttons {
+  display: flex;
+  gap: 8px;
+}
 .seg-size {
   text-align: right;
 }

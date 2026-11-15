@@ -14,6 +14,7 @@ import { pitchRatioOf } from './lib/pitch';
 import {
   DEFAULT_VALUES,
   buildPlan,
+  canPickSegments,
   displayPointsFor,
   runLabel,
   segmentRows,
@@ -52,6 +53,8 @@ export default function App() {
   const [mode, setMode] = useState<SplitMode>('interval');
   const [values, setValues] = useState<SplitValues>(DEFAULT_VALUES);
   const [manualPoints, setManualPoints] = useState<number[]>([]);
+  // 書き出さない区間の番号（0 始まり）。区間の数やモードが変わったら選び直し（全部書き出す）に戻す
+  const [excluded, setExcluded] = useState<ReadonlySet<number>>(() => new Set());
   const [notice, setNotice] = useState<Notice | null>(null);
   const [output, setOutput] = useState<OutputState>(DEFAULT_OUTPUT);
   // 形式ごとに書き出せるか（起動時に 1 回調べる。調べている間は null）
@@ -114,6 +117,7 @@ export default function App() {
         setMode('interval');
         setValues(DEFAULT_VALUES);
         setManualPoints([]);
+        setExcluded(new Set());
         setOutput({ ...DEFAULT_OUTPUT, kind: i.copyFormat ? 'copy' : 'encode' });
         setProbe({ status: 'idle' });
       } catch (e) {
@@ -196,7 +200,27 @@ export default function App() {
     [info, mode, manualPoints, values, duration, bytesPerSec],
   );
   const rows = useMemo(() => segmentRows(points, duration, bytesPerSec), [points, duration, bytesPerSec]);
-  const totalBytes = bytesPerSec * duration;
+
+  // ---- 書き出す区間の選択 ----
+  const pickable = canPickSegments(mode, rows.length);
+  useEffect(() => {
+    setExcluded((prev) => (prev.size === 0 ? prev : new Set()));
+  }, [rows.length, mode]);
+  const activeExcluded = useMemo(() => (pickable ? excluded : new Set<number>()), [pickable, excluded]);
+  const pickedCount = rows.length - activeExcluded.size;
+  // 出力合計の目安（一部だけ書き出すときは選んだ区間の分だけ）
+  const totalBytes = rows.reduce((s, r) => s + (activeExcluded.has(r.index) ? 0 : r.bytes), 0);
+  const togglePicked = useCallback((i: number) => {
+    setExcluded((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
+  }, []);
+  const pickAll = useCallback((on: boolean) => {
+    setExcluded(on ? new Set() : new Set(rows.map((r) => r.index)));
+  }, [rows]);
 
   // ---- 分割点の編集 ----
   const onMovePoint = useCallback((i: number, sec: number) => {
@@ -278,10 +302,13 @@ export default function App() {
   const outputUnavailable =
     info !== null &&
     ((!encoding && !info.copyFormat) || (encoding && !info.canDecode));
-  const runDisabled = !info || !file || settingsError !== null || outputUnavailable || busy;
+  const nothingPicked = pickable && pickedCount === 0;
+  const runDisabled = !info || !file || settingsError !== null || outputUnavailable || nothingPicked || busy;
   const disabledReason = settingsError
     ? settingsError
-    : outputUnavailable
+    : nothingPicked
+      ? '書き出す区間を 1 つ以上選んでください。'
+      : outputUnavailable
       ? 'この音声は、このブラウザでは書き出せる方法がありません。Chrome か Edge で開いてください。'
       : null;
 
@@ -292,7 +319,7 @@ export default function App() {
     abortRef.current = ac;
     progress.set(null);
     setRunState({ status: 'running' });
-    const plan = buildPlan(mode, values, points);
+    const plan = buildPlan(mode, values, points, activeExcluded);
     try {
       const parts = await runJob(file, info, plan, outputSpec, {
         signal: ac.signal,
@@ -380,6 +407,10 @@ export default function App() {
               error={settingsError}
               points={points}
               rows={rows}
+              pickable={pickable}
+              excluded={activeExcluded}
+              onTogglePicked={togglePicked}
+              onPickAll={pickAll}
               speed={speedOn ? player.rate : 1}
               locked={busy}
               onAdjustManually={() => handoverToManual(points)}
@@ -400,7 +431,7 @@ export default function App() {
               playback={playback}
             />
             <RunPanel
-              label={runLabel(mode, partCount, encoding, encoding && isPcmFormat(output.format))}
+              label={runLabel(mode, partCount, encoding, encoding && isPcmFormat(output.format), pickedCount)}
               disabled={runDisabled}
               disabledReason={disabledReason}
               state={runState}

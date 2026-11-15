@@ -77,10 +77,23 @@ export function displayPointsFor(
 }
 
 /** runJob に渡す分割計画 */
-export function buildPlan(mode: SplitMode, vals: SplitValues, points: number[]): SplitPlan {
+export function buildPlan(
+  mode: SplitMode,
+  vals: SplitValues,
+  points: number[],
+  excluded: ReadonlySet<number> = new Set(),
+): SplitPlan {
   if (mode === 'maxSize') return { kind: 'maxSize', maxBytes: (parseNumber(vals.maxMB) ?? 0) * MB };
   if (mode === 'none') return { kind: 'points', points: [] };
-  return { kind: 'points', points };
+  if (excluded.size === 0) return { kind: 'points', points };
+  const only: number[] = [];
+  for (let i = 0; i <= points.length; i++) if (!excluded.has(i)) only.push(i);
+  return { kind: 'points', points, only };
+}
+
+/** 区間を選んで書き出せるモードか（サイズ上限は区間が実行時に決まるので選べない） */
+export function canPickSegments(mode: SplitMode, rowCount: number): boolean {
+  return mode !== 'maxSize' && mode !== 'none' && rowCount > 1;
 }
 
 export interface SegmentRow {
@@ -108,8 +121,19 @@ export function segmentRows(
 }
 
 /** 実行ボタンの文言。convert = WAV / FLAC への変換（「圧縮」ではないので言い方を変える） */
-export function runLabel(mode: SplitMode, partCount: number, encode: boolean, convert = false): string {
+export function runLabel(
+  mode: SplitMode,
+  partCount: number,
+  encode: boolean,
+  convert = false,
+  pickedCount = partCount,
+): string {
   const verb = convert ? '変換' : '圧縮';
+  if (mode !== 'maxSize' && partCount > 1 && pickedCount < partCount) {
+    return encode
+      ? `${partCount} 個のうち ${pickedCount} 個を${verb}して書き出す`
+      : `${partCount} 個のうち ${pickedCount} 個を書き出す`;
+  }
   if (mode === 'maxSize') return encode ? `サイズ上限で分割・${verb}して書き出す` : 'サイズ上限で分割して書き出す';
   if (partCount <= 1) return encode ? `${verb}して書き出す` : 'そのまま書き出す';
   return encode ? `${partCount} 個に分割・${verb}して書き出す` : `${partCount} 個に分割して書き出す`;
